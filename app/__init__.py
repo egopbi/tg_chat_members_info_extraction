@@ -2,10 +2,6 @@
 
 from __future__ import annotations
 
+from .ui import main
+
 __all__ = ["main"]
-
-
-def main() -> int:
-    """Temporary package entrypoint used by the bootstrap handoff."""
-
-    return 0
