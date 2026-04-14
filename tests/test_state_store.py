@@ -30,14 +30,20 @@ def test_state_store_persists_sessions_and_active_state(tmp_path: Path) -> None:
     assert active_state.session_name == session.session_name
 
     runtime_dir = tmp_path / ".runtime"
-    sessions_dir = runtime_dir / "sessions"
-    session_file = next(sessions_dir.glob("*.json"))
+    session_meta_dir = runtime_dir / "session_meta"
+    session_file = next(
+        path
+        for path in session_meta_dir.glob("*.json")
+        if path.name != "active_session.json"
+    )
 
     if os.name == "posix":
         assert stat.S_IMODE(runtime_dir.stat().st_mode) == 0o700
-        assert stat.S_IMODE(sessions_dir.stat().st_mode) == 0o700
+        assert stat.S_IMODE(session_meta_dir.stat().st_mode) == 0o700
         assert stat.S_IMODE(session_file.stat().st_mode) == 0o600
-        assert stat.S_IMODE((runtime_dir / "active_session.json").stat().st_mode) == 0o600
+        assert stat.S_IMODE((session_meta_dir / "active_session.json").stat().st_mode) == 0o600
+
+    assert not (runtime_dir / "sessions").exists()
 
 
 def test_state_store_clears_active_session(tmp_path: Path) -> None:

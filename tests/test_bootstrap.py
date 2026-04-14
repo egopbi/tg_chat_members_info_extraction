@@ -55,6 +55,16 @@ def test_bootstrap_runs_app_directly_inside_project_venv(tmp_path: Path) -> None
     venv_python = tmp_path / ".venv" / "bin" / "python"
     venv_python.parent.mkdir(parents=True, exist_ok=True)
     venv_python.write_text("", encoding="utf-8")
+    marker = tmp_path / ".venv" / ".requirements.sha256"
+    marker.write_text(
+        hashlib.sha256(requirements_file.read_bytes()).hexdigest(),
+        encoding="utf-8",
+    )
+
+    original_prefix = main.sys.prefix
+    original_base_prefix = main.sys.base_prefix
+    main.sys.prefix = str(tmp_path / ".venv")
+    main.sys.base_prefix = "/usr"
 
     calls: list[str] = []
 
@@ -71,18 +81,73 @@ def test_bootstrap_runs_app_directly_inside_project_venv(tmp_path: Path) -> None
     def handoff_to_app(_: Path) -> None:
         calls.append("handoff")
 
-    exit_code = main.bootstrap(
-        project_root=tmp_path,
-        version_info=(3, 10),
-        current_executable=venv_python,
-        create_venv=create_venv,
-        install_requirements=install_requirements,
-        run_app=run_app,
-        handoff_to_app=handoff_to_app,
-    )
+    try:
+        exit_code = main.bootstrap(
+            project_root=tmp_path,
+            version_info=(3, 10),
+            current_executable=Path("/usr/bin/python3"),
+            create_venv=create_venv,
+            install_requirements=install_requirements,
+            run_app=run_app,
+            handoff_to_app=handoff_to_app,
+        )
+    finally:
+        main.sys.prefix = original_prefix
+        main.sys.base_prefix = original_base_prefix
 
     assert exit_code == 7
-    assert calls == ["install", "run"]
+    assert calls == ["run"]
+
+
+def test_bootstrap_uses_runtime_prefix_instead_of_binary_path_for_venv_detection(
+    tmp_path: Path,
+) -> None:
+    requirements_file = tmp_path / "requirements.txt"
+    requirements_file.write_text(
+        "Telethon>=1.40,<2\nquestionary>=2,<3\n",
+        encoding="utf-8",
+    )
+    venv_python = tmp_path / ".venv" / "bin" / "python"
+    venv_python.parent.mkdir(parents=True, exist_ok=True)
+    venv_python.write_text("", encoding="utf-8")
+    marker = tmp_path / ".venv" / ".requirements.sha256"
+    marker.write_text(
+        hashlib.sha256(requirements_file.read_bytes()).hexdigest(),
+        encoding="utf-8",
+    )
+
+    original_prefix = main.sys.prefix
+    original_base_prefix = main.sys.base_prefix
+    main.sys.prefix = str(tmp_path / ".venv")
+    main.sys.base_prefix = "/usr"
+
+    calls: list[str] = []
+
+    def install_requirements(_: Path, __: Path) -> None:
+        calls.append("install")
+
+    def run_app() -> int:
+        calls.append("run")
+        return 0
+
+    def handoff_to_app(_: Path) -> None:
+        calls.append("handoff")
+
+    try:
+        exit_code = main.bootstrap(
+            project_root=tmp_path,
+            version_info=(3, 10),
+            current_executable=Path("/usr/bin/python3"),
+            install_requirements=install_requirements,
+            run_app=run_app,
+            handoff_to_app=handoff_to_app,
+        )
+    finally:
+        main.sys.prefix = original_prefix
+        main.sys.base_prefix = original_base_prefix
+
+    assert exit_code == 0
+    assert calls == ["run"]
 
 
 def test_bootstrap_rejects_unsupported_python_version() -> None:

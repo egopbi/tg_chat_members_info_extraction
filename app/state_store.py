@@ -30,17 +30,18 @@ def _encode_session_name(session_name: str) -> str:
 class StateStore:
     def __init__(self, runtime_dir: Path | str = ".runtime") -> None:
         self.runtime_dir = Path(runtime_dir)
+        self.session_meta_dir = self.runtime_dir / "session_meta"
         self.sessions_dir = self.runtime_dir / "sessions"
-        self.active_session_file = self.runtime_dir / "active_session.json"
+        self.active_session_file = self.session_meta_dir / "active_session.json"
         self._ensure_private_directory(self.runtime_dir)
-        self._ensure_private_directory(self.sessions_dir)
+        self._ensure_private_directory(self.session_meta_dir)
 
     def _ensure_private_directory(self, path: Path) -> None:
         path.mkdir(parents=True, exist_ok=True)
         _best_effort_chmod(path, PRIVATE_DIRECTORY_MODE)
 
     def _session_path(self, session_name: str) -> Path:
-        return self.sessions_dir / f"{_encode_session_name(session_name)}.json"
+        return self.session_meta_dir / f"{_encode_session_name(session_name)}.json"
 
     def _write_json(self, path: Path, payload: dict[str, Any]) -> None:
         self._ensure_private_directory(path.parent)
@@ -72,8 +73,8 @@ class StateStore:
     def list_sessions(self) -> list[SessionMeta]:
         sessions = [
             SessionMeta.from_dict(self._read_json(path))
-            for path in self.sessions_dir.glob("*.json")
-            if path.is_file()
+            for path in self.session_meta_dir.glob("*.json")
+            if path.is_file() and path.name != self.active_session_file.name
         ]
         return sorted(sessions, key=lambda item: item.session_name.casefold())
 

@@ -26,6 +26,10 @@ def _datetime_from_text(value: str, label: str) -> datetime:
     return parsed
 
 
+def _is_blank_text(value: Any) -> bool:
+    return isinstance(value, str) and not value.strip()
+
+
 @dataclass(frozen=True, slots=True)
 class FieldResult(Generic[T]):
     status: FieldStatus
@@ -36,7 +40,7 @@ class FieldResult(Generic[T]):
         if self.status not in {"value", "empty", "unavailable", "error"}:
             raise ValueError(f"Unsupported field status: {self.status}")
         if self.status == "value":
-            if self.value is None:
+            if self.value is None or _is_blank_text(self.value):
                 raise ValueError("value status requires a value")
             if self.error_message is not None:
                 raise ValueError("value status cannot include an error message")

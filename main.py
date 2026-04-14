@@ -65,12 +65,31 @@ def _handoff_to_app(venv_python: Path) -> None:
     )
 
 
-def _same_interpreter(venv_python: Path, current_executable: Path | None = None) -> bool:
-    executable = Path(sys.executable if current_executable is None else current_executable)
-    try:
-        return executable.resolve() == venv_python.resolve()
-    except FileNotFoundError:
+def _path_matches(candidate: str | Path | None, target: Path) -> bool:
+    if candidate is None:
         return False
+    candidate_path = Path(candidate)
+    if candidate_path == target:
+        return True
+    try:
+        return candidate_path.samefile(target)
+    except OSError:
+        return False
+
+
+def _same_interpreter(venv_python: Path, current_executable: Path | None = None) -> bool:
+    project_venv = venv_python.parent.parent
+    runtime_prefix = sys.prefix
+    base_prefix = sys.base_prefix
+    virtual_env = os.environ.get("VIRTUAL_ENV")
+
+    if _path_matches(runtime_prefix, project_venv):
+        return True
+    if _path_matches(virtual_env, project_venv):
+        return True
+    if runtime_prefix != base_prefix and current_executable is not None:
+        return project_venv in current_executable.parents
+    return False
 
 
 def _requirements_hash(requirements_file: Path) -> str:

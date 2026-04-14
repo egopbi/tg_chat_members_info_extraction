@@ -27,6 +27,12 @@ def test_field_result_contracts() -> None:
     assert error_result.status == "error"
     assert error_result.error_message == "telegram throttled"
 
+    with pytest.raises(ValueError, match="value status requires a value"):
+        FieldResult.from_value("")
+
+    with pytest.raises(ValueError, match="value status requires a value"):
+        FieldResult.from_value("   ")
+
 
 def test_field_result_round_trip() -> None:
     payload = FieldResult.from_value("example").to_dict()
