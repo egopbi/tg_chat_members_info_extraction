@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.avatar_store import AvatarStore, safe_filename
-from app.member_export import ExportSummary, export_members
+from app.member_export import ExportProgressSnapshot, ExportSummary, export_members
 
 
 @dataclass(slots=True)
@@ -157,6 +157,75 @@ def test_export_members_is_best_effort_and_summary_rich(tmp_path: Path) -> None:
 
     csv_bytes = summary.csv_path.read_bytes()
     assert csv_bytes.startswith(b"\xef\xbb\xbf")
+
+
+def test_export_members_emits_progress_snapshots_with_expected_total(tmp_path: Path) -> None:
+    gateway = FakeGateway()
+    gateway.participants = [
+        gateway.me,
+        FakeParticipant(id=2, first_name="Alice", last_name="Example", username="alice", photo=object()),
+        FakeParticipant(id=2, first_name="Alice", last_name="Example", username="alice", photo=object()),
+        FakeParticipant(id=3, first_name="Bob", last_name=None, username=None, photo=None),
+    ]
+    gateway.participant_iteration_calls = 1
+
+    snapshots: list[ExportProgressSnapshot] = []
+
+    summary = asyncio.run(
+        export_members(
+            gateway,
+            chat=object(),
+            runtime_dir=tmp_path / ".runtime",
+            run_id="run-progress",
+            expected_total=10,
+            sleep=lambda _: asyncio.sleep(0),
+            jitter=lambda _: 0.0,
+            progress_callback=snapshots.append,
+        )
+    )
+
+    assert summary.exported_count == 2
+    assert summary.skipped_current_account == 1
+    assert summary.deduplicated_count == 1
+    assert summary.failed_user_ids == ()
+    assert [snapshot.total for snapshot in snapshots] == [10, 10, 10, 10, 10, 10]
+    assert [snapshot.processed for snapshot in snapshots] == [0, 1, 2, 3, 4, 4]
+    assert [snapshot.exported for snapshot in snapshots] == [0, 0, 1, 1, 2, 2]
+    assert [snapshot.skipped for snapshot in snapshots] == [0, 1, 1, 1, 1, 1]
+    assert [snapshot.deduplicated for snapshot in snapshots] == [0, 0, 0, 1, 1, 1]
+    assert [snapshot.failed for snapshot in snapshots] == [0, 0, 0, 0, 0, 0]
+    assert snapshots[-1].is_final is True
+
+
+def test_export_members_emits_final_progress_snapshot_when_row_fails(tmp_path: Path) -> None:
+    gateway = FakeGateway()
+    gateway.participants = [
+        gateway.me,
+        FakeParticipant(id=4, first_name="Retry", last_name="User", username="retry", photo=object()),
+    ]
+    gateway.participant_iteration_calls = 1
+
+    snapshots: list[ExportProgressSnapshot] = []
+
+    summary = asyncio.run(
+        export_members(
+            gateway,
+            chat=object(),
+            runtime_dir=tmp_path / ".runtime",
+            run_id="run-progress-failure",
+            expected_total=2,
+            sleep=lambda _: asyncio.sleep(0),
+            jitter=lambda _: 0.0,
+            progress_callback=snapshots.append,
+        )
+    )
+
+    assert summary.exported_count == 1
+    assert summary.failed_user_ids == (4,)
+    assert snapshots[-1].is_final is True
+    assert snapshots[-1].processed == 2
+    assert snapshots[-1].exported == 1
+    assert snapshots[-1].failed == 1
 
 
 def test_export_members_stops_after_four_waits_for_one_operation(tmp_path: Path) -> None:

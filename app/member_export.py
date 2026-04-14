@@ -67,6 +67,18 @@ class MemberExportRow:
 
 
 @dataclass(frozen=True, slots=True)
+class ExportProgressSnapshot:
+    run_id: str
+    total: int | None
+    processed: int
+    exported: int
+    skipped: int
+    deduplicated: int
+    failed: int
+    is_final: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class ExportSummary:
     run_id: str
     chat_label: str | None
@@ -85,6 +97,34 @@ class ExportSummary:
 def _now_run_id() -> str:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     return f"{timestamp}-{uuid.uuid4().hex[:8]}"
+
+
+def _emit_progress(
+    progress_callback: Callable[[ExportProgressSnapshot], Any] | None,
+    *,
+    run_id: str,
+    total: int | None,
+    processed: int,
+    exported: int,
+    skipped: int,
+    deduplicated: int,
+    failed: int,
+    is_final: bool = False,
+) -> None:
+    if progress_callback is None:
+        return
+    progress_callback(
+        ExportProgressSnapshot(
+            run_id=run_id,
+            total=total,
+            processed=processed,
+            exported=exported,
+            skipped=skipped,
+            deduplicated=deduplicated,
+            failed=failed,
+            is_final=is_final,
+        )
+    )
 
 
 def _clean_text(value: Any) -> str:
@@ -436,18 +476,22 @@ async def export_members(
     chat: Any,
     *,
     run_id: str | None = None,
+    expected_total: int | None = None,
     runtime_dir: Path | str = ".runtime",
     csv_writer: CSVWriter | None = None,
     avatar_store: AvatarStore | None = None,
     retry_policy: RetryPolicy | None = None,
     sleep: Callable[[float], Any] = asyncio.sleep,
     jitter: Callable[[float], float] | None = None,
+    progress_callback: Callable[[ExportProgressSnapshot], Any] | None = None,
     chat_label: str | None = None,
 ) -> ExportSummary:
     policy = retry_policy or RetryPolicy()
     store = avatar_store or AvatarStore(runtime_dir)
     writer = csv_writer or CSVWriter()
     run_id = run_id or _now_run_id()
+    if expected_total is not None and expected_total < 0:
+        raise ValueError("expected_total must be non-negative")
 
     avatars_dir = store.avatars_dir(run_id)
     csv_path = store.run_dir(run_id) / "members.csv"
@@ -458,12 +502,25 @@ async def export_members(
     total_seen = 0
     skipped_current = 0
     deduplicated = 0
+    exported_count = 0
+    failed_count = 0
 
     current_user_id = await _current_user_id(
         gateway,
         policy=policy,
         sleep=sleep,
         jitter=jitter,
+    )
+
+    _emit_progress(
+        progress_callback,
+        run_id=run_id,
+        total=expected_total,
+        processed=0,
+        exported=0,
+        skipped=0,
+        deduplicated=0,
+        failed=0,
     )
 
     try:
@@ -478,9 +535,29 @@ async def export_members(
             user_id = _extract_user_id(participant)
             if user_id == current_user_id:
                 skipped_current += 1
+                _emit_progress(
+                    progress_callback,
+                    run_id=run_id,
+                    total=expected_total,
+                    processed=total_seen,
+                    exported=exported_count,
+                    skipped=skipped_current,
+                    deduplicated=deduplicated,
+                    failed=failed_count,
+                )
                 continue
             if user_id in seen_user_ids:
                 deduplicated += 1
+                _emit_progress(
+                    progress_callback,
+                    run_id=run_id,
+                    total=expected_total,
+                    processed=total_seen,
+                    exported=exported_count,
+                    skipped=skipped_current,
+                    deduplicated=deduplicated,
+                    failed=failed_count,
+                )
                 continue
             seen_user_ids.add(user_id)
 
@@ -496,14 +573,40 @@ async def export_members(
             if row is None:
                 continue
             exported_rows.append(row)
+            exported_count += 1
             if warning:
                 warnings.append(warning)
             if failed:
                 failed_user_ids.append(user_id)
+                failed_count += 1
+
+            _emit_progress(
+                progress_callback,
+                run_id=run_id,
+                total=expected_total,
+                processed=total_seen,
+                exported=exported_count,
+                skipped=skipped_current,
+                deduplicated=deduplicated,
+                failed=failed_count,
+            )
     except Exception as exc:
         warnings.append(f"participant iteration stopped after retries: {exc}")
 
-    writer.write(csv_path, [row.to_csv_row() for row in exported_rows])
+    try:
+        writer.write(csv_path, [row.to_csv_row() for row in exported_rows])
+    finally:
+        _emit_progress(
+            progress_callback,
+            run_id=run_id,
+            total=expected_total,
+            processed=total_seen,
+            exported=exported_count,
+            skipped=skipped_current,
+            deduplicated=deduplicated,
+            failed=failed_count,
+            is_final=True,
+        )
 
     return ExportSummary(
         run_id=run_id,
