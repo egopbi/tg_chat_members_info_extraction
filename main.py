@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import subprocess
 import sys
@@ -10,11 +11,14 @@ import venv
 from pathlib import Path
 from typing import Callable
 
+from app.runtime_logging import configure_runtime_logging
+
 MINIMUM_PYTHON = (3, 10)
 PROJECT_ROOT = Path(__file__).resolve().parent
 VENV_DIRECTORY_NAME = ".venv"
 REQUIREMENTS_FILENAME = "requirements.txt"
 REQUIREMENTS_MARKER_FILENAME = ".requirements.sha256"
+logger = logging.getLogger(__name__)
 
 
 def _project_root(path: Path | None = None) -> Path:
@@ -126,27 +130,40 @@ def bootstrap(
 ) -> int:
     """Prepare the self-managed virtual environment and launch the app package."""
 
-    _require_supported_python(version_info)
     root = _project_root(project_root)
-    venv_dir = _venv_dir(root)
-    venv_python = _venv_python(root)
-    requirements_file = root / REQUIREMENTS_FILENAME
+    configure_runtime_logging(root / ".runtime")
+    logger.info("Bootstrap starting for %s", root)
 
-    if not requirements_file.exists():
-        raise FileNotFoundError(requirements_file)
+    try:
+        _require_supported_python(version_info)
+        venv_dir = _venv_dir(root)
+        venv_python = _venv_python(root)
+        requirements_file = root / REQUIREMENTS_FILENAME
 
-    if not venv_python.exists():
-        create_venv(venv_dir)
+        if not requirements_file.exists():
+            raise FileNotFoundError(requirements_file)
 
-    if not _requirements_are_current(venv_dir, requirements_file):
-        install_requirements(venv_python, requirements_file)
-        _record_requirements_hash(venv_dir, requirements_file)
+        if not venv_python.exists():
+            logger.info("Creating virtual environment at %s", venv_dir)
+            create_venv(venv_dir)
 
-    if _same_interpreter(venv_python, current_executable=current_executable):
-        return run_app()
+        if not _requirements_are_current(venv_dir, requirements_file):
+            logger.info("Installing requirements from %s", requirements_file)
+            install_requirements(venv_python, requirements_file)
+            _record_requirements_hash(venv_dir, requirements_file)
 
-    handoff_to_app(venv_python)
-    return 0
+        if _same_interpreter(venv_python, current_executable=current_executable):
+            logger.info("Running app in the current interpreter")
+            exit_code = run_app()
+            logger.info("App finished with exit code %s", exit_code)
+            return exit_code
+
+        logger.info("Handing off to app interpreter at %s", venv_python)
+        handoff_to_app(venv_python)
+        return 0
+    except Exception:
+        logger.exception("Bootstrap failed")
+        raise
 
 
 def main() -> int:

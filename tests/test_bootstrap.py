@@ -150,9 +150,9 @@ def test_bootstrap_uses_runtime_prefix_instead_of_binary_path_for_venv_detection
     assert calls == ["run"]
 
 
-def test_bootstrap_rejects_unsupported_python_version() -> None:
+def test_bootstrap_rejects_unsupported_python_version(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="Python 3.10 or newer is required"):
-        main.bootstrap(version_info=(3, 9))
+        main.bootstrap(project_root=tmp_path, version_info=(3, 9))
 
 
 def test_bootstrap_skips_dependency_installation_when_marker_matches(

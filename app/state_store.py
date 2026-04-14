@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import json
 import os
 import tempfile
@@ -14,6 +15,7 @@ from .models import ActiveSessionState, SessionMeta
 
 PRIVATE_DIRECTORY_MODE = 0o700
 PRIVATE_FILE_MODE = 0o600
+logger = logging.getLogger(__name__)
 
 
 def _best_effort_chmod(path: Path, mode: int) -> None:
@@ -94,13 +96,16 @@ class StateStore:
         )
 
     def save_session(self, session: SessionMeta) -> None:
+        logger.debug("Saving session metadata for %r", session.session_name)
         self._write_json(self.session_meta_path(session.session_name), session.to_dict())
 
     def load_session(self, session_name: str) -> SessionMeta:
+        logger.debug("Loading session metadata for %r", session_name)
         session = SessionMeta.from_dict(self._read_json(self.session_meta_path(session_name)))
         return self._apply_active_marker(session)
 
     def list_sessions(self) -> list[SessionMeta]:
+        logger.debug("Listing sessions from %s", self.session_meta_dir)
         active_session_name = self._active_session_name()
         sessions = [
             self._apply_active_marker(
@@ -110,12 +115,15 @@ class StateStore:
             for path in self.session_meta_dir.glob("*.json")
             if path.is_file()
         ]
+        logger.debug("Listed %d sessions", len(sessions))
         return sorted(sessions, key=lambda item: item.session_name.casefold())
 
     def save_active_session(self, state: ActiveSessionState) -> None:
+        logger.debug("Saving active session state for %r", state.session_name)
         self._write_json(self.active_session_file, state.to_dict())
 
     def set_active_session(self, session_name: str) -> ActiveSessionState:
+        logger.info("Setting active session to %r", session_name)
         state = ActiveSessionState(
             session_name=session_name,
             updated_at=datetime.now(timezone.utc),
@@ -125,8 +133,11 @@ class StateStore:
 
     def load_active_session(self) -> ActiveSessionState | None:
         if not self.active_session_file.exists():
+            logger.debug("No active session state is stored")
             return None
+        logger.debug("Loading active session state")
         return ActiveSessionState.from_dict(self._read_json(self.active_session_file))
 
     def clear_active_session(self) -> None:
+        logger.info("Clearing active session state")
         self.active_session_file.unlink(missing_ok=True)

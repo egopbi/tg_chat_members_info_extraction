@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -32,6 +33,7 @@ MENU_EXPORT = "Export members"
 MENU_CREATE_SESSION = "Create new session"
 MENU_SWITCH_SESSION = "Switch active session"
 MENU_EXIT = "Exit"
+logger = logging.getLogger(__name__)
 
 
 class PromptCancelled(RuntimeError):
@@ -377,12 +379,16 @@ class TerminalUI:
             except PromptCancelled:
                 self.printer("Operation cancelled.")
             except SessionLoginError as exc:
+                logger.exception("Session login failed")
                 self.printer(f"Session login failed: {exc}")
             except NoActiveSessionError as exc:
+                logger.exception("Operation failed because no active session is selected")
                 self.printer(str(exc))
             except SessionAuthorizationError as exc:
+                logger.exception("Operation failed because the session is not authorized")
                 self.printer(str(exc))
             except Exception as exc:  # pragma: no cover - defensive runtime guard
+                logger.exception("Operation failed")
                 self.printer(f"Operation failed: {exc}")
 
     def _normalize_phone_number(self, value: str) -> str:
@@ -671,8 +677,10 @@ def run_app() -> int:
     session_manager = SessionManager(StateStore())
     ui = TerminalUI(session_manager)
     try:
+        logger.info("Starting interactive terminal UI")
         return ui.run()
     except KeyboardInterrupt:  # pragma: no cover - interactive only
+        logger.info("Interactive terminal UI interrupted")
         return 130
 
 

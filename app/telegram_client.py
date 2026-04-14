@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -16,6 +17,7 @@ from .models import RetryPolicy
 from .state_store import StateStore
 
 T = TypeVar("T")
+logger = logging.getLogger(__name__)
 
 
 class TelegramGatewayError(RuntimeError):
@@ -44,6 +46,7 @@ class TelegramGateway:
         api_hash: str,
         **client_kwargs: Any,
     ) -> TelegramClient:
+        logger.debug("Building Telegram client for session %r", session_name)
         kwargs = {
             "flood_sleep_threshold": 0,
             "request_retries": 0,
@@ -82,13 +85,16 @@ class TelegramGateway:
     ) -> AsyncIterator[TelegramClient]:
         client = self.build_client(session_name, api_id, api_hash, **client_kwargs)
         try:
+            logger.info("Connecting Telegram session %r", session_name)
             await self.run_with_retry(
                 client.connect,
                 operation_name=f"connect Telegram session {session_name!r}",
             )
+            logger.info("Connected Telegram session %r", session_name)
             yield client
         finally:
             if client.is_connected():
+                logger.info("Disconnecting Telegram session %r", session_name)
                 await client.disconnect()
 
     @staticmethod
@@ -109,17 +115,28 @@ class TelegramGateway:
         waits_used = 0
         attempt_number = 1
 
+        logger.debug("Starting %s", operation_name)
         while True:
             try:
-                return await operation()
+                result = await operation()
+                logger.debug("%s succeeded on attempt %d", operation_name, attempt_number)
+                return result
             except Exception as error:
                 if not self.is_retryable_error(error) or waits_used >= policy.max_waits:
+                    logger.exception("%s failed on attempt %d", operation_name, attempt_number)
                     raise
 
                 delay = policy.wait_seconds_for_attempt(attempt_number)
                 seconds = getattr(error, "seconds", None)
                 if isinstance(seconds, (int, float)) and seconds > 0:
                     delay = max(delay, float(seconds))
+                logger.warning(
+                    "%s hit %s; retrying in %.2fs",
+                    operation_name,
+                    error.__class__.__name__,
+                    delay,
+                    exc_info=True,
+                )
                 await self._sleep(delay)
                 waits_used += 1
                 attempt_number += 1
@@ -129,10 +146,13 @@ class TelegramGateway:
             client.is_user_authorized,
             operation_name="check Telegram authorization",
         )
+        logger.info("Telegram authorization check returned %s", authorized)
         if not authorized:
+            logger.warning("Telegram client is not authorized")
             raise TelegramGatewayError("Telegram client is not authorized")
 
     async def get_current_user(self, client: TelegramClient) -> Any:
+        logger.debug("Fetching current Telegram account")
         return await self.run_with_retry(
             client.get_me,
             operation_name="fetch current Telegram account",
@@ -145,6 +165,7 @@ class TelegramGateway:
         *,
         force_sms: bool = False,
     ) -> Any:
+        logger.info("Requesting Telegram login code (force_sms=%s)", force_sms)
         return await self.run_with_retry(
             lambda: client.send_code_request(phone, force_sms=force_sms),
             operation_name="request Telegram login code",
@@ -155,6 +176,7 @@ class TelegramGateway:
         client: TelegramClient,
         **kwargs: Any,
     ) -> Any:
+        logger.info("Completing Telegram login")
         return await self.run_with_retry(
             lambda: client.sign_in(**kwargs),
             operation_name="complete Telegram login",

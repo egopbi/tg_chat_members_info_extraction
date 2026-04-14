@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -12,6 +13,8 @@ from telethon import errors
 from .models import SessionMeta
 from .state_store import StateStore
 from .telegram_client import TelegramGateway
+
+logger = logging.getLogger(__name__)
 
 
 class SessionManagerError(RuntimeError):
@@ -91,15 +94,18 @@ class SessionManager:
         self.gateway = gateway or TelegramGateway(state_store)
 
     def list_sessions(self) -> list[SessionMeta]:
+        logger.debug("SessionManager listing sessions")
         return self.state_store.list_sessions()
 
     def load_session(self, session_name: str) -> SessionMeta:
+        logger.debug("SessionManager loading session %r", session_name)
         try:
             return self.state_store.load_session(session_name)
         except FileNotFoundError as exc:
             raise SessionNotFoundError(session_name) from exc
 
     def get_active_session(self) -> SessionMeta | None:
+        logger.debug("SessionManager resolving active session")
         active_state = self.state_store.load_active_session()
         if active_state is None:
             return None
@@ -109,6 +115,7 @@ class SessionManager:
             return None
 
     def set_active_session(self, session_name: str) -> SessionMeta:
+        logger.info("SessionManager setting active session to %r", session_name)
         session = self.load_session(session_name)
         self.state_store.set_active_session(session.session_name)
         return self.load_session(session.session_name)
@@ -125,6 +132,12 @@ class SessionManager:
         force_sms: bool = False,
     ) -> SessionMeta:
         session_name = _clean_text(session_name, "session_name")
+        logger.info(
+            "Creating session %r (mark_active=%s, force_sms=%s)",
+            session_name,
+            mark_active,
+            force_sms,
+        )
         existing = self._load_existing_session(session_name)
         supplied_phone = (
             phone_number
@@ -135,13 +148,16 @@ class SessionManager:
         created_at = existing.created_at if existing is not None else _utc_now()
 
         async with self.gateway.open_client(session_name, api_id, api_hash) as client:
+            logger.debug("Checking Telegram authorization for session %r", session_name)
             authorized = await self.gateway.run_with_retry(
                 client.is_user_authorized,
                 operation_name="check Telegram authorization",
             )
             if authorized:
+                logger.debug("Session %r is already authorized", session_name)
                 user = await self.gateway.get_current_user(client)
             else:
+                logger.info("Session %r requires Telegram login", session_name)
                 user = await self._complete_login(
                     client=client,
                     session_name=session_name,
@@ -163,10 +179,16 @@ class SessionManager:
             is_active=False,
         )
         self.state_store.save_session(session)
+        logger.info(
+            "Saved session %r for %s",
+            session.session_name,
+            session.account_label or session.phone_number,
+        )
 
         if mark_active:
             self.state_store.set_active_session(session.session_name)
             session = self.state_store.load_session(session.session_name)
+            logger.info("Marked session %r as active", session.session_name)
         return session
 
     @asynccontextmanager
@@ -175,6 +197,7 @@ class SessionManager:
         session_name: str | None = None,
     ) -> AsyncIterator[Any]:
         session = self._resolve_session(session_name)
+        logger.info("Opening authorized client for session %r", session.session_name)
         async with self.gateway.open_client(
             session.session_name,
             session.api_id,
@@ -188,14 +211,17 @@ class SessionManager:
                 raise SessionAuthorizationError(
                     f"Session {session.session_name!r} is not authorized"
                 )
+            logger.debug("Authorized client opened for session %r", session.session_name)
             yield client
 
     def _resolve_session(self, session_name: str | None) -> SessionMeta:
         if session_name is None:
+            logger.debug("Resolving active session for sessionless operation")
             session = self.get_active_session()
             if session is None:
                 raise NoActiveSessionError("No active session is selected")
             return session
+        logger.debug("Resolving explicit session %r", session_name)
         return self.load_session(session_name)
 
     def _load_existing_session(self, session_name: str) -> SessionMeta | None:
@@ -213,6 +239,7 @@ class SessionManager:
         phone_number: str,
         force_sms: bool,
     ) -> Any:
+        logger.info("Starting Telegram login for session %r", session_name)
         sent_code = await self.gateway.request_login_code(
             client,
             phone_number,
@@ -223,6 +250,11 @@ class SessionManager:
             raise SessionLoginError("Telegram did not return a phone code hash")
 
         for code_attempt in range(1, 4):
+            logger.debug(
+                "Requesting login code attempt %d for session %r",
+                code_attempt,
+                session_name,
+            )
             code = _clean_text(
                 prompts.request_code(session_name, phone_number, code_attempt),
                 "login code",
@@ -237,13 +269,26 @@ class SessionManager:
                     phone_code_hash=phone_code_hash,
                 )
             except errors.PhoneCodeInvalidError as exc:
+                logger.warning(
+                    "Telegram rejected the login code for session %r on attempt %d",
+                    session_name,
+                    code_attempt,
+                    exc_info=True,
+                )
                 if code_attempt >= 3:
                     raise SessionLoginError("Telegram login code was rejected") from exc
                 continue
             except errors.PhoneCodeExpiredError as exc:
+                logger.warning(
+                    "Telegram login code expired for session %r on attempt %d",
+                    session_name,
+                    code_attempt,
+                    exc_info=True,
+                )
                 if code_attempt >= 3:
                     raise SessionLoginError("Telegram login code expired") from exc
 
+            logger.debug("Refreshing login code hash for session %r", session_name)
             sent_code = await self.gateway.request_login_code(
                 client,
                 phone_number,
@@ -264,6 +309,11 @@ class SessionManager:
         attempt_number: int,
     ) -> Any:
         for password_attempt in range(attempt_number, 4):
+            logger.debug(
+                "Requesting Telegram password attempt %d for session %r",
+                password_attempt,
+                session_name,
+            )
             password = _clean_text(
                 prompts.request_password(session_name, password_attempt),
                 "Telegram password",
@@ -272,6 +322,12 @@ class SessionManager:
                 await self.gateway.sign_in(client, password=password)
                 return await self.gateway.get_current_user(client)
             except errors.PasswordHashInvalidError as exc:
+                logger.warning(
+                    "Telegram rejected the password for session %r on attempt %d",
+                    session_name,
+                    password_attempt,
+                    exc_info=True,
+                )
                 if password_attempt >= 3:
                     raise SessionLoginError("Telegram password was rejected") from exc
 
@@ -288,6 +344,7 @@ class SessionManager:
         phone_code_hash: str,
     ) -> Any:
         try:
+            logger.debug("Signing in session %r with a login code", session_name)
             await self.gateway.sign_in(
                 client,
                 phone=phone_number,
@@ -296,6 +353,7 @@ class SessionManager:
             )
             return await self.gateway.get_current_user(client)
         except errors.SessionPasswordNeededError:
+            logger.info("Telegram requested a password for session %r", session_name)
             return await self._complete_login_with_password(
                 client=client,
                 session_name=session_name,
