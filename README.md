@@ -1,126 +1,300 @@
-# Telegram Members Export
+# Экспорт участников Telegram
 
-Local terminal tool for creating named Telegram sessions, switching the active session, and exporting group or supergroup members to CSV with local avatar downloads.
+Этот репозиторий работает одним основным способом:
 
-## Start
+- `python3 main.py` запускает интерактивный Terminal UI. Это основной рекомендуемый способ работы для обычного пользователя.
 
-Run the app from the repository root:
+Во время работы инструмент:
+
+- создает и хранит именованные Telegram-сессии локально;
+- позволяет переключать активную сессию;
+- ищет группу, супергруппу или форум по вставленному названию;
+- экспортирует участников в CSV;
+- скачивает аватары локально;
+- показывает live progress во время экспорта;
+- пишет подробный runtime log в файл для диагностики.
+
+## Требования
+
+- Python `>= 3.10`
+- интерактивный терминал:
+  - macOS/Linux: `zsh`, `bash` или другой TTY-совместимый shell;
+  - Windows: PowerShell, Windows Terminal или `cmd.exe`;
+- Telegram `API_ID` и `API_HASH`, которые вы получаете для своей учетной записи;
+- доступ в интернет для работы с Telegram API.
+
+## Подготовка проекта
+
+1. Получите проект и перейдите в корень репозитория.
+
+Если вы используете `git`:
+
+```bash
+git clone <URL_репозитория>
+cd tg_chat_members_info_extraction
+```
+
+Если репозиторий уже лежит у вас локально, просто перейдите в его папку:
+
+```bash
+cd /путь/к/tg_chat_members_info_extraction
+```
+
+2. Проверьте, что Python доступен в терминале:
+
+```bash
+python3 --version
+```
+
+Ожидается версия `3.10` или выше.
+
+3. Запустите приложение:
 
 ```bash
 python3 main.py
 ```
 
-On first launch, the bootstrapper:
+При первом запуске bootstrap:
 
-1. verifies Python `>= 3.10`
-2. creates a local `.venv`
-3. installs runtime dependencies from `requirements.txt`
-4. restarts the app inside `.venv`
+- проверяет версию Python;
+- создает локальное окружение `.venv`;
+- при необходимости восстанавливает `pip` внутри `.venv`;
+- устанавливает зависимости из `requirements.txt`;
+- перезапускает приложение уже внутри `.venv`.
 
-No manual `.env` editing is required for normal use.
+Вручную активировать `.venv` для обычной работы не нужно.
 
-If you start it in a non-interactive shell, it exits with a clear message instead of waiting for prompts.
+Если вы запускаете команду не из интерактивного терминала, приложение завершится сообщением:
 
-## Interactive Menu
+```text
+Interactive terminal required. Run `python3 main.py` from a TTY.
+```
 
-The terminal UI uses arrow-key prompts and shows:
+## Основная команда
 
-- the current active session, if one exists
-- a short last-export status, when available
+Запуск интерфейса:
 
-Main actions:
+```bash
+python3 main.py
+```
 
-- `Export members`
-- `Create new session`
-- `Switch active session`
-- `Exit`
+Что можно сделать в интерфейсе:
 
-## Create a Session
+- создать новую Telegram-сессию по `API_ID`, `API_HASH`, номеру телефона, коду и паролю;
+- выбрать активную сессию среди уже сохраненных;
+- вставить название группы или супергруппы и выбрать нужный чат из совпадений;
+- запустить экспорт участников в CSV;
+- следить за прогрессом экспорта в реальном времени;
+- посмотреть путь к актуальному log-файлу, если что-то пошло не так.
 
-`Create new session` asks for:
+## Основные действия в интерфейсе
 
-- session name
-- `API_ID`
-- masked `API_HASH`
-- Telegram login phone, code, and password prompts through `SessionPrompts`
+### `Create new session`
 
-After login completes, the session metadata is saved locally and you can mark the new session as active.
+Сценарий спрашивает:
 
-## Switch Active Session
+- имя сессии;
+- `API_ID`;
+- `API_HASH`;
+- номер телефона Telegram;
+- код подтверждения;
+- пароль двухфакторной аутентификации, если Telegram его запросит.
 
-`Switch active session` shows all saved sessions in an arrow-key picker with enough context to tell them apart:
+После успешного логина метаданные сессии сохраняются локально. Новую сессию можно сразу отметить как активную.
 
-- session name
-- account label or masked phone
-- active marker
+### `Switch active session`
 
-## Export Members
+Интерфейс показывает список сохраненных сессий и помогает различать их по:
 
-`Export members`:
+- имени сессии;
+- метке аккаунта, если ее удалось определить;
+- маскированному номеру телефона;
+- признаку текущей активной сессии.
 
-1. requires an active session
-2. asks for a pasted group or supergroup title, including Unicode and emoji
-3. resolves matching dialogs with exact, normalized, then substring ranking
-4. shows a disambiguation picker if multiple dialogs share the same title
-5. exports members except the current account
-6. downloads profile avatars locally
-7. writes a CSV with paired value/status columns for optional fields
+### `Export members`
 
-Output files are created under:
+Сценарий:
+
+1. требует активную Telegram-сессию;
+2. просит вставить название группы, супергруппы или форума;
+3. ищет совпадения по точному, нормализованному и подстрочному совпадению названия;
+4. предлагает выбрать нужный чат, если совпадений несколько;
+5. перечисляет участников;
+6. пропускает текущий аккаунт и убирает дубликаты;
+7. для каждого участника пытается получить расширенный профиль, linked channel и аватар;
+8. пишет live progress строку в терминал;
+9. сохраняет CSV и файлы аватаров.
+
+## Что попадает в результаты
+
+Основные артефакты создаются в `.runtime/exports/<run_id>/`:
 
 - `.runtime/exports/<run_id>/members.csv`
 - `.runtime/exports/<run_id>/avatars/`
 
-## Runtime Storage And Secrets
-
-Local runtime state lives under `.runtime/` and is intentionally private:
+Локальное runtime-хранилище проекта содержит:
 
 - `.runtime/sessions/<name>.session`
 - `.runtime/session_meta/<name>.json`
 - `.runtime/active_session.json`
+- `.runtime/runtime.log`
 - `.runtime/exports/<run_id>/...`
 
-Treat both `.session` files and stored `API_HASH` values as secrets. Keep the repository directory private and do not commit `.runtime/` or `.venv/`.
+Секреты и чувствительные данные:
 
-The code uses restrictive permissions where the platform supports them:
+- файлы `.session` нужно считать секретными;
+- `API_HASH` хранится локально и тоже должен считаться секретом;
+- `.runtime/` и `.venv/` нельзя коммитить в репозиторий.
 
-- directories: `700`
-- files: `600`
+На POSIX-платформах проект старается использовать ограниченные права:
 
-## CSV Format
+- директории: `700`
+- файлы: `600`
 
-The export CSV uses:
+## Формат CSV
 
-- `;` as the separator
-- `utf-8-sig` encoding
+CSV сохраняется с параметрами:
 
-Optional and enriched fields expose both the value column and a status column with one of:
+- разделитель: `;`
+- кодировка: `utf-8-sig`
+
+Колонки:
+
+- `user_id`
+- `first_name`
+- `last_name`
+- `username`
+- `about`
+- `about_status`
+- `birthday`
+- `birthday_status`
+- `photo_path`
+- `photo_path_status`
+- `linked_channel_url`
+- `linked_channel_url_status`
+
+Для обогащаемых полей используются статусы:
 
 - `value`
 - `empty`
 - `unavailable`
 - `error`
 
-## Telegram Limitations
+Что это значит:
 
-The tool cannot bypass Telegram privacy or API constraints. Expected external limitations include:
+- `value`: значение успешно получено;
+- `empty`: поле существует, но у пользователя оно пустое;
+- `unavailable`: Telegram не дал доступ к этому полю или сущности;
+- `error`: операция завершилась ошибкой даже после ретраев.
 
-- hidden profile fields
-- inaccessible linked channels
-- incomplete participant visibility
-- `FloodWait` and other throttling
-- forum topics inside a forum supergroup are out of scope
+## Как работает экспорт участников
 
-The exporter retries retryable Telegram failures with bounded waits, but if Telegram keeps rejecting the request, the affected field or operation becomes `error`.
+Ниже описана логика без кода.
 
-## Smoke Checks
+1. Экспорт получает текущего пользователя Telegram и запоминает его `user_id`, чтобы не выгружать самого себя.
+2. Затем он начинает перечислять участников выбранного чата через Telegram API.
+3. Для каждого уникального участника формируется строка экспорта:
+   - базовые поля берутся из участника;
+   - `about` и `birthday` берутся из full profile;
+   - `linked_channel_url` строится из linked channel, если он доступен;
+   - `photo_path` сохраняется только если аватар удалось скачать.
+4. Для каждого участника пишется live progress snapshot с количеством увиденных, обработанных, выгруженных, пропущенных, дублирующихся и проблемных записей.
+5. В конце все строки сериализуются в `members.csv`.
 
-Useful local checks:
+Важно понимать:
+
+- перечисление идет последовательно, а не пачками;
+- ограничение Telegram может ударить именно по отдельным enrichment-запросам, а не по самому списку участников;
+- full profile, linked channel и аватар обрабатываются best-effort: если одна часть упала, CSV все равно будет собран;
+- темы внутри forum supergroup в этом инструменте не поддерживаются как отдельные сущности экспорта.
+
+## Логирование и ретраи
+
+Во время запуска создается и поддерживается runtime log:
+
+- `.runtime/runtime.log`
+
+В этот файл пишутся:
+
+- bootstrap и запуск приложения;
+- операции с локальным состоянием и Telegram-сессиями;
+- ход экспорта;
+- retry и `FloodWait`;
+- traceback необработанных исключений;
+- вывод `pip` и `ensurepip`, если bootstrap ремонтирует окружение.
+
+Если Telegram возвращает явный cooldown, ретраи ждут именно то количество секунд, которое сказал Telegram. Если явного cooldown нет, используется локальная backoff-политика.
+
+Если кажется, что скрипт завис:
+
+- сначала смотрите live progress в терминале;
+- затем открывайте `.runtime/runtime.log`.
+
+Именно этот файл удобнее всего прикладывать для диагностики.
+
+## Вспомогательные команды
+
+Эти команды обычно нужны для проверки проекта, а не для повседневного использования.
+
+Проверить синтаксис:
 
 ```bash
 python3 -m compileall main.py app tests
+```
+
+Прогнать тесты:
+
+```bash
 .venv/bin/python -m pytest
+```
+
+Повторно запустить приложение:
+
+```bash
 python3 main.py
 ```
 
-The last command should be run from an interactive terminal. In a non-interactive environment it exits predictably.
+## Ограничения Telegram API
+
+Инструмент не обходит ограничения Telegram. Ожидаемые внешние ограничения:
+
+- скрытые поля профиля;
+- недоступные linked channel;
+- неполная видимость участников;
+- `FloodWait` и другие формы throttling;
+- изменения лимитов Telegram без предупреждения;
+- отсутствие гарантии, что каждый enrichment-запрос пройдет с первого раза.
+
+Поэтому даже при корректной работе кода часть полей в CSV может оказаться пустой или получить статус `unavailable` / `error`.
+
+## Частые вопросы и ошибки
+
+### Приложение пишет `Interactive terminal required`
+
+Вы запустили команду не из TTY. Откройте обычный терминал и выполните `python3 main.py` там.
+
+### Приложение падает на установке зависимостей
+
+Сначала откройте `.runtime/runtime.log`. Bootstrap пишет туда stderr/stdout `pip` и `ensurepip`, поэтому реальная причина почти всегда будет именно там.
+
+### Чат не находится по названию
+
+Проверьте:
+
+- что вы используете правильную активную сессию;
+- что нужный чат доступен этому аккаунту;
+- что в названии нет лишних пробелов;
+- что вы вставили именно название чата, а не username или ссылку.
+
+### Экспорт завершился, но часть строк имеет статус `error`
+
+Обычно это означает одно из двух:
+
+- Telegram вернул `FloodWait`, и после допустимого количества ретраев операция так и не восстановилась;
+- конкретное enrichment-действие упало по сетевой или API-причине.
+
+Смотрите `runtime.log` и ищите `Fetch full profile`, `Resolve linked channel`, `Download avatar` и `FloodWait`.
+
+### Почему выгружается не 100% информации по каждому пользователю
+
+Потому что Telegram не гарантирует полный доступ ко всем полям профиля каждого участника. Инструмент не взламывает приватность и не обходит ограничения API.

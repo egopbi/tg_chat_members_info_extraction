@@ -11,3 +11,4 @@ wheels/
 .runtime/
 repo-c4.json
 AGENTS.md
+.codex
