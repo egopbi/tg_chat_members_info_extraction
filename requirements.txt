@@ -1,0 +1,2 @@
+Telethon>=1.40,<2
+questionary>=2,<3
