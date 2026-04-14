@@ -89,10 +89,13 @@ class QuestionaryPromptBackend:
         secret: bool = False,
     ) -> str | None:
         library = self._require_questionary()
+        prompt_kwargs: dict[str, Any] = {}
+        if default is not None:
+            prompt_kwargs["default"] = default
         prompt = (
-            library.password(message, default=default)
+            library.password(message, **prompt_kwargs)
             if secret
-            else library.text(message, default=default)
+            else library.text(message, **prompt_kwargs)
         )
         try:
             return self._unwrap(prompt.ask())

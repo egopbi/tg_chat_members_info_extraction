@@ -15,6 +15,29 @@ from app.ui import MENU_EXIT, ScriptedPromptBackend, TerminalUI
 from telethon import errors
 
 
+class _FakePrompt:
+    def __init__(self, result: str) -> None:
+        self.result = result
+        self.ask_calls = 0
+
+    def ask(self) -> str:
+        self.ask_calls += 1
+        return self.result
+
+
+class _FakeQuestionary:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, dict[str, object]]] = []
+
+    def text(self, message: str, **kwargs: object) -> _FakePrompt:
+        self.calls.append(("text", message, dict(kwargs)))
+        return _FakePrompt("plain-value")
+
+    def password(self, message: str, **kwargs: object) -> _FakePrompt:
+        self.calls.append(("password", message, dict(kwargs)))
+        return _FakePrompt("secret-value")
+
+
 class FakeLoginClient:
     def __init__(self, *, authorized: bool, user: object) -> None:
         self.authorized = authorized
@@ -156,6 +179,23 @@ def _make_summary(runtime_dir: Path) -> ExportSummary:
         failed_user_ids=(),
         warnings=("user 2: one warning",),
     )
+
+
+def test_questionary_prompt_backend_omits_none_default_for_text_and_password(monkeypatch) -> None:
+    fake_questionary = _FakeQuestionary()
+    monkeypatch.setattr(ui, "questionary", fake_questionary)
+
+    backend = ui.QuestionaryPromptBackend()
+
+    assert backend.ask_text("Session name:") == "plain-value"
+    assert backend.ask_text("API hash:", secret=True) == "secret-value"
+    assert backend.ask_text("Optional value:", default="fallback") == "plain-value"
+
+    assert fake_questionary.calls == [
+        ("text", "Session name:", {}),
+        ("password", "API hash:", {}),
+        ("text", "Optional value:", {"default": "fallback"}),
+    ]
 
 
 def test_app_main_refuses_non_interactive_stdio(monkeypatch, capsys) -> None:
