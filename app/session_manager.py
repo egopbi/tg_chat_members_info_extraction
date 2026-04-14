@@ -239,6 +239,7 @@ class SessionManager:
             except errors.PhoneCodeInvalidError as exc:
                 if code_attempt >= 3:
                     raise SessionLoginError("Telegram login code was rejected") from exc
+                continue
             except errors.PhoneCodeExpiredError as exc:
                 if code_attempt >= 3:
                     raise SessionLoginError("Telegram login code expired") from exc

@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from telethon import errors
 
 from app.models import SessionMeta
 from app.session_manager import (
@@ -39,6 +40,17 @@ class FakePrompts:
     def request_password(self, session_name: str, attempt_number: int) -> str:
         self.password_requests.append((session_name, attempt_number))
         return "secret"
+
+
+class RetryOncePrompts(FakePrompts):
+    def request_code(
+        self,
+        session_name: str,
+        phone_number: str,
+        attempt_number: int,
+    ) -> str:
+        self.code_requests.append((session_name, phone_number, attempt_number))
+        return "bad-code" if attempt_number == 1 else "good-code"
 
 
 class FakeClient:
@@ -75,6 +87,8 @@ class FakeClient:
 
     async def sign_in(self, **kwargs: object) -> object:
         self.calls.append(("sign_in", (), kwargs))
+        if kwargs.get("code") == "bad-code":
+            raise errors.PhoneCodeInvalidError(None)
         self.authorized = True
         return self.user
 
@@ -84,6 +98,7 @@ class FakeGateway:
         self.store = store
         self.client = client
         self.retry_calls: list[str] = []
+        self.login_code_requests = 0
 
     def session_path(self, session_name: str) -> Path:
         return self.store.session_artifact_path(session_name)
@@ -112,6 +127,7 @@ class FakeGateway:
         *,
         force_sms: bool = False,
     ) -> object:
+        self.login_code_requests += 1
         return await client.send_code_request(phone, force_sms=force_sms)
 
     async def sign_in(self, client: FakeClient, **kwargs: object) -> object:
@@ -149,6 +165,57 @@ def test_create_session_persists_metadata_and_can_mark_active(tmp_path: Path) ->
         assert prompts.phone_requests == ["Сессия 👋"]
         assert prompts.code_requests == [("Сессия 👋", "+15551234567", 1)]
         assert (store.session_artifact_path("Сессия 👋")).exists()
+
+    asyncio.run(run())
+
+
+def test_create_session_reuses_phone_code_hash_after_invalid_code(tmp_path: Path) -> None:
+    async def run() -> None:
+        store = StateStore(tmp_path / ".runtime")
+        user = SimpleNamespace(
+            username="alice",
+            first_name="Alice",
+            last_name="Example",
+            phone="15551234567",
+        )
+        client = FakeClient(authorized=False, user=user)
+        gateway = FakeGateway(store, client)
+        manager = SessionManager(store, gateway=gateway)
+        prompts = RetryOncePrompts()
+
+        session = await manager.create_session(
+            session_name="retry-session",
+            api_id=123456,
+            api_hash="hash",
+            prompts=prompts,
+        )
+
+        assert session.session_name == "retry-session"
+        assert gateway.login_code_requests == 1
+        assert prompts.code_requests == [
+            ("retry-session", "+15551234567", 1),
+            ("retry-session", "+15551234567", 2),
+        ]
+        assert [call for call in client.calls if call[0] == "sign_in"] == [
+            (
+                "sign_in",
+                (),
+                {
+                    "phone": "+15551234567",
+                    "code": "bad-code",
+                    "phone_code_hash": "hash-1",
+                },
+            ),
+            (
+                "sign_in",
+                (),
+                {
+                    "phone": "+15551234567",
+                    "code": "good-code",
+                    "phone_code_hash": "hash-1",
+                },
+            ),
+        ]
 
     asyncio.run(run())
 

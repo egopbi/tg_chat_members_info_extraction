@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, TypeVar
 
-from telethon import TelegramClient, errors
+from telethon import TelegramClient, errors, utils
+from telethon.tl import functions
 
 from .models import RetryPolicy
 from .state_store import StateStore
@@ -50,6 +52,25 @@ class TelegramGateway:
         }
         kwargs.update(client_kwargs)
         return TelegramClient(self.session_path(session_name), api_id, api_hash, **kwargs)
+
+    def bind_client(self, client: TelegramClient) -> "TelegramClientAdapter":
+        return TelegramClientAdapter(client)
+
+    @asynccontextmanager
+    async def open_member_gateway(
+        self,
+        session_name: str,
+        api_id: int,
+        api_hash: str,
+        **client_kwargs: Any,
+    ) -> AsyncIterator["TelegramClientAdapter"]:
+        async with self.open_client(
+            session_name,
+            api_id,
+            api_hash,
+            **client_kwargs,
+        ) as client:
+            yield self.bind_client(client)
 
     @asynccontextmanager
     async def open_client(
@@ -138,3 +159,27 @@ class TelegramGateway:
             lambda: client.sign_in(**kwargs),
             operation_name="complete Telegram login",
         )
+
+
+@dataclass(slots=True)
+class TelegramClientAdapter:
+    client: TelegramClient
+
+    async def get_me(self) -> Any:
+        return await self.client.get_me()
+
+    def iter_participants(self, chat: Any) -> AsyncIterator[Any]:
+        return self.client.iter_participants(chat)
+
+    async def get_full_user(self, user: Any) -> Any:
+        custom_getter = getattr(self.client, "get_full_user", None)
+        if callable(custom_getter):
+            return await custom_getter(user)
+        input_user = utils.get_input_user(user)
+        return await self.client(functions.users.GetFullUserRequest(input_user))
+
+    async def get_entity(self, peer: Any) -> Any:
+        return await self.client.get_entity(peer)
+
+    async def download_profile_photo(self, entity: Any, file: Path) -> str | None:
+        return await self.client.download_profile_photo(entity, file=file)
