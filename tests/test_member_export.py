@@ -189,7 +189,8 @@ def test_export_members_emits_progress_snapshots_with_expected_total(tmp_path: P
     assert summary.deduplicated_count == 1
     assert summary.failed_user_ids == ()
     assert [snapshot.total for snapshot in snapshots] == [10, 10, 10, 10, 10, 10]
-    assert [snapshot.processed for snapshot in snapshots] == [0, 1, 2, 3, 4, 4]
+    assert [snapshot.processed for snapshot in snapshots] == [0, 1, 2, 2, 3, 3]
+    assert [snapshot.observed for snapshot in snapshots] == [0, 1, 2, 3, 4, 4]
     assert [snapshot.exported for snapshot in snapshots] == [0, 0, 1, 1, 2, 2]
     assert [snapshot.skipped for snapshot in snapshots] == [0, 1, 1, 1, 1, 1]
     assert [snapshot.deduplicated for snapshot in snapshots] == [0, 0, 0, 1, 1, 1]
@@ -224,6 +225,7 @@ def test_export_members_emits_final_progress_snapshot_when_row_fails(tmp_path: P
     assert summary.failed_user_ids == (4,)
     assert snapshots[-1].is_final is True
     assert snapshots[-1].processed == 2
+    assert snapshots[-1].observed == 2
     assert snapshots[-1].exported == 1
     assert snapshots[-1].failed == 1
 

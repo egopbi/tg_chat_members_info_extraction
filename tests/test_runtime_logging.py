@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,8 +13,13 @@ import pytest
 from telethon import errors
 
 import main
+import app
 from app.models import SessionMeta
-from app.runtime_logging import configure_runtime_logging, runtime_log_path
+from app.runtime_logging import (
+    RUNTIME_LOG_ENV_VAR,
+    configure_runtime_logging,
+    runtime_log_path,
+)
 from app.state_store import StateStore
 from app.telegram_client import TelegramGateway
 
@@ -71,6 +78,45 @@ def test_bootstrap_logs_lifecycle_and_failures(tmp_path: Path) -> None:
     assert "Running app in the current interpreter" in log_text
     assert "Bootstrap failed" in log_text
     assert "RuntimeError: boom" in log_text
+
+
+def test_app_main_logs_ui_import_failures(tmp_path: Path, monkeypatch) -> None:
+    log_path = configure_runtime_logging(tmp_path / ".runtime")
+    monkeypatch.setenv(RUNTIME_LOG_ENV_VAR, str(log_path))
+    monkeypatch.setattr(app, "_PROJECT_ROOT", tmp_path)
+    fake_ui = type(sys)("app.ui")
+    monkeypatch.setitem(sys.modules, "app.ui", fake_ui)
+
+    exit_code = app.main()
+
+    assert exit_code == 1
+    log_text = (tmp_path / ".runtime" / "runtime.log").read_text(encoding="utf-8")
+    assert "Application crashed" in log_text
+    assert "cannot import name 'main'" in log_text
+
+
+def test_install_requirements_logs_pip_output_on_failure(tmp_path: Path, monkeypatch) -> None:
+    log_path = configure_runtime_logging(tmp_path / ".runtime")
+    monkeypatch.setenv(RUNTIME_LOG_ENV_VAR, str(log_path))
+
+    def fake_run(*args, **kwargs):
+        return subprocess.CompletedProcess(
+            args[0],
+            1,
+            stdout="pip stdout details",
+            stderr="pip stderr details",
+        )
+
+    monkeypatch.setattr(main.subprocess, "run", fake_run)
+
+    with pytest.raises(subprocess.CalledProcessError):
+        main._install_requirements(tmp_path / ".venv" / "bin" / "python", tmp_path / "requirements.txt")
+
+    log_text = (tmp_path / ".runtime" / "runtime.log").read_text(encoding="utf-8")
+    assert "pip install stdout:" in log_text
+    assert "pip stdout details" in log_text
+    assert "pip install stderr:" in log_text
+    assert "pip stderr details" in log_text
 
 
 def test_state_store_logs_state_operations(tmp_path: Path) -> None:

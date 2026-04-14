@@ -49,9 +49,35 @@ def _create_venv(venv_dir: Path) -> None:
 
 
 def _install_requirements(venv_python: Path, requirements_file: Path) -> None:
-    subprocess.run(
-        [str(venv_python), "-m", "pip", "install", "-r", str(requirements_file)],
-        check=True,
+    command = [
+        str(venv_python),
+        "-m",
+        "pip",
+        "install",
+        "-r",
+        str(requirements_file),
+    ]
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        if result.stdout.strip():
+            logger.debug("pip install stdout:\n%s", result.stdout.strip())
+        if result.stderr.strip():
+            logger.debug("pip install stderr:\n%s", result.stderr.strip())
+        return
+
+    if result.stdout.strip():
+        logger.error("pip install stdout:\n%s", result.stdout.strip())
+    if result.stderr.strip():
+        logger.error("pip install stderr:\n%s", result.stderr.strip())
+    raise subprocess.CalledProcessError(
+        result.returncode,
+        command,
+        output=result.stdout,
+        stderr=result.stderr,
     )
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -8,8 +9,9 @@ from types import SimpleNamespace
 
 import app
 import app.ui as ui
-from app.member_export import ExportSummary
+from app.member_export import ExportProgressSnapshot, ExportSummary
 from app.models import DialogCandidate, SessionMeta
+from app.runtime_logging import RUNTIME_LOG_ENV_VAR, configure_runtime_logging
 from app.state_store import StateStore
 from app.ui import MENU_EXIT, ScriptedPromptBackend, TerminalUI
 from telethon import errors
@@ -223,6 +225,38 @@ def test_terminal_ui_run_allows_prompt_backend_to_use_own_event_loop(monkeypatch
     assert backend.select_messages[0][0] == "Choose an action:"
 
 
+def test_terminal_ui_prints_runtime_log_path(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv(RUNTIME_LOG_ENV_VAR, raising=False)
+    manager = FakeSessionManager(tmp_path / ".runtime")
+    printed: list[str] = []
+    terminal = TerminalUI(
+        manager,
+        backend=ScriptedPromptBackend(select_responses=[MENU_EXIT]),
+        printer=printed.append,
+    )
+
+    terminal._print_status()
+
+    assert printed[-1] == f"Log file: {manager.state_store.runtime_dir / 'runtime.log'}"
+
+
+def test_terminal_ui_prefers_configured_runtime_log_path(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv(RUNTIME_LOG_ENV_VAR, raising=False)
+    configured_path = configure_runtime_logging(tmp_path / "configured-runtime")
+    monkeypatch.setenv(RUNTIME_LOG_ENV_VAR, str(configured_path))
+    manager = FakeSessionManager(tmp_path / ".runtime")
+    printed: list[str] = []
+    terminal = TerminalUI(
+        manager,
+        backend=ScriptedPromptBackend(select_responses=[MENU_EXIT]),
+        printer=printed.append,
+    )
+
+    terminal._print_status()
+
+    assert printed[-1] == f"Log file: {configured_path}"
+
+
 def test_create_session_flow_saves_metadata_and_marks_active(tmp_path: Path) -> None:
     manager = FakeSessionManager(tmp_path / ".runtime")
     backend = ScriptedPromptBackend(
@@ -301,7 +335,13 @@ def test_export_members_flow_uses_duplicate_picker_and_updates_last_status(
     )
     manager = FakeSessionManager(tmp_path / ".runtime", active_session=active)
     backend = ScriptedPromptBackend(text_responses=["Telegram Forum 👋"], select_responses=[])
-    terminal = TerminalUI(manager, backend=backend, printer=lambda *_args, **_kwargs: None)
+    progress_output = io.StringIO()
+    terminal = TerminalUI(
+        manager,
+        backend=backend,
+        printer=lambda *_args, **_kwargs: None,
+        status_stream=progress_output,
+    )
 
     candidates = [
         DialogCandidate(
@@ -329,6 +369,34 @@ def test_export_members_flow_uses_duplicate_picker_and_updates_last_status(
     async def fake_export_members(gateway: object, chat: object, **kwargs: object) -> ExportSummary:
         assert isinstance(chat, SimpleNamespace)
         assert chat.peer == -1002
+        assert kwargs["expected_total"] == 20
+        progress_callback = kwargs["progress_callback"]
+        assert callable(progress_callback)
+        progress_callback(
+            ExportProgressSnapshot(
+                run_id="run-001",
+                total=20,
+                processed=0,
+                observed=0,
+                exported=0,
+                skipped=0,
+                deduplicated=0,
+                failed=0,
+            )
+        )
+        progress_callback(
+            ExportProgressSnapshot(
+                run_id="run-001",
+                total=20,
+                processed=2,
+                observed=2,
+                exported=1,
+                skipped=1,
+                deduplicated=0,
+                failed=0,
+                is_final=True,
+            )
+        )
         return _make_summary(manager.state_store.runtime_dir)
 
     monkeypatch.setattr(ui, "find_dialog_candidates", fake_find_dialog_candidates)
@@ -341,3 +409,5 @@ def test_export_members_flow_uses_duplicate_picker_and_updates_last_status(
     assert terminal.last_export_summary is not None
     assert terminal.last_export_summary.exported_count == 1
     assert backend.select_messages[0][0] == "Multiple dialogs matched. Choose one:"
+    assert "Export progress [" in progress_output.getvalue()
+    assert "2/20" in progress_output.getvalue()

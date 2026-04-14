@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from pathlib import Path
 
 RUNTIME_LOG_FILENAME = "runtime.log"
+RUNTIME_LOG_ENV_VAR = "TG_MEMBERS_RUNTIME_LOG_PATH"
 _LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 _LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 _RUNTIME_HANDLER_ATTR = "_runtime_log_path"
@@ -15,6 +17,13 @@ _excepthook_installed = False
 
 def runtime_log_path(runtime_dir: Path | str = ".runtime") -> Path:
     return Path(runtime_dir) / RUNTIME_LOG_FILENAME
+
+
+def configured_runtime_log_path(runtime_dir: Path | str = ".runtime") -> Path:
+    configured = os.environ.get(RUNTIME_LOG_ENV_VAR)
+    if configured:
+        return Path(configured)
+    return runtime_log_path(runtime_dir)
 
 
 def _best_effort_chmod(path: Path, mode: int) -> None:
@@ -51,6 +60,7 @@ def configure_runtime_logging(runtime_dir: Path | str = ".runtime") -> Path:
     _best_effort_chmod(runtime_dir, 0o700)
 
     log_path = runtime_log_path(runtime_dir)
+    os.environ[RUNTIME_LOG_ENV_VAR] = str(log_path)
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.DEBUG)
 

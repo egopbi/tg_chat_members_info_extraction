@@ -20,8 +20,9 @@ except ImportError:  # pragma: no cover - fallback for environments without deps
 from telethon import errors
 
 from .dialog_search import DialogCandidate, find_dialog_candidates
-from .member_export import ExportSummary, export_members
+from .member_export import ExportProgressSnapshot, ExportSummary, export_members
 from .models import SessionMeta
+from .runtime_logging import configured_runtime_log_path
 from .session_manager import (
     NoActiveSessionError,
     SessionLoginError,
@@ -34,6 +35,7 @@ MENU_CREATE_SESSION = "Create new session"
 MENU_SWITCH_SESSION = "Switch active session"
 MENU_EXIT = "Exit"
 logger = logging.getLogger(__name__)
+_PROGRESS_BAR_WIDTH = 24
 
 
 class PromptCancelled(RuntimeError):
@@ -274,6 +276,41 @@ def _detailed_export_status(summary: ExportSummary) -> list[str]:
     return lines
 
 
+def _render_export_progress(snapshot: ExportProgressSnapshot) -> str:
+    details = (
+        f"seen {snapshot.observed} | exported {snapshot.exported} | skipped {snapshot.skipped} | "
+        f"duplicates {snapshot.deduplicated} | failed {snapshot.failed}"
+    )
+    if snapshot.total is None:
+        return f"Export progress {snapshot.processed} processed | {details}"
+    total = max(snapshot.total, 0)
+    if total == 0:
+        bar = "-" * _PROGRESS_BAR_WIDTH
+        return f"Export progress [{bar}] 0/0 | {details}"
+    completed = min(snapshot.processed, total)
+    filled = min(
+        _PROGRESS_BAR_WIDTH,
+        int((completed / total) * _PROGRESS_BAR_WIDTH),
+    )
+    bar = "#" * filled + "-" * (_PROGRESS_BAR_WIDTH - filled)
+    return f"Export progress [{bar}] {completed}/{total} | {details}"
+
+
+@dataclass(slots=True)
+class LiveProgressWriter:
+    stream: Any
+    _last_width: int = 0
+
+    def update(self, snapshot: ExportProgressSnapshot) -> None:
+        line = _render_export_progress(snapshot)
+        self._last_width = max(self._last_width, len(line))
+        self.stream.write(f"\r{line.ljust(self._last_width)}")
+        if snapshot.is_final:
+            self.stream.write("\n")
+            self._last_width = 0
+        self.stream.flush()
+
+
 class TerminalUI:
     def __init__(
         self,
@@ -281,10 +318,12 @@ class TerminalUI:
         *,
         backend: PromptBackend | None = None,
         printer: Any = print,
+        status_stream: Any | None = None,
     ) -> None:
         self.session_manager = session_manager
         self.backend = backend or QuestionaryPromptBackend()
         self.printer = printer
+        self.status_stream = status_stream or sys.stdout
         self.last_export_summary: ExportSummary | None = None
 
     def _run_async(self, awaitable: Any) -> Any:
@@ -301,6 +340,9 @@ class TerminalUI:
             self.printer("Last export: none")
         else:
             self.printer(f"Last export: {_short_export_status(self.last_export_summary)}")
+        self.printer(
+            f"Log file: {configured_runtime_log_path(self.session_manager.state_store.runtime_dir)}"
+        )
 
     def _ask_text(self, message: str, *, secret: bool = False) -> str:
         while True:
@@ -370,6 +412,7 @@ class TerminalUI:
                 return 0
 
             try:
+                logger.info("Selected UI action %s", action)
                 if action == MENU_EXPORT:
                     self.export_members_flow()
                 elif action == MENU_CREATE_SESSION:
@@ -487,6 +530,7 @@ class TerminalUI:
         session_name = self._ask_text("Session name:")
         api_id = self._ask_positive_int("API_ID:")
         api_hash = self._ask_text("API_HASH:", secret=True)
+        logger.info("Starting create-session flow for %r", session_name)
 
         phone_number = self._ask_text(f"Phone number for session {session_name!r}:")
         login_prelude = self._run_async(
@@ -557,6 +601,7 @@ class TerminalUI:
                 raise SessionLoginError("Telegram login code attempts were exhausted")
 
         session = self._save_session(session_name, api_id, api_hash, user, phone_number)
+        logger.info("Created session metadata for %r", session.session_name)
         self.printer(
             f"Created session {session.session_name!r} for "
             f"{session.account_label or _mask_phone_number(session.phone_number) or 'unknown account'}"
@@ -564,6 +609,7 @@ class TerminalUI:
 
         if self._ask_confirm("Mark this session as active?", default=True):
             session = self.session_manager.set_active_session(session.session_name)
+            logger.info("Marked %r as the active session from UI", session.session_name)
             self.printer(f"Active session set to {session.session_name!r}")
 
     def switch_active_session_flow(self) -> None:
@@ -584,6 +630,7 @@ class TerminalUI:
             ],
         )
         session = self.session_manager.set_active_session(str(choice))
+        logger.info("Switched the active session to %r", session.session_name)
         self.printer(f"Active session set to {_session_context(session)}")
 
     def _ensure_active_session(self) -> Any | None:
@@ -633,6 +680,7 @@ class TerminalUI:
         self,
         session_name: str,
         candidate: DialogCandidate,
+        progress_callback: Any | None = None,
     ) -> ExportSummary:
         async with self.session_manager.open_authorized_client(session_name) as client:
             gateway = self.session_manager.gateway.bind_client(client)
@@ -640,7 +688,9 @@ class TerminalUI:
             return await export_members(
                 gateway,
                 chat,
+                expected_total=candidate.participants_count,
                 runtime_dir=self.session_manager.state_store.runtime_dir,
+                progress_callback=progress_callback,
                 chat_label=candidate.title,
             )
 
@@ -659,9 +709,29 @@ class TerminalUI:
         if candidate is None:
             return
 
-        summary = self._run_async(self._export_selected_dialog(session.session_name, candidate))
+        logger.info(
+            "Starting export for session=%r peer_id=%s title=%r expected_total=%s",
+            session.session_name,
+            candidate.peer_id,
+            candidate.title,
+            candidate.participants_count,
+        )
+        progress_writer = LiveProgressWriter(self.status_stream)
+        summary = self._run_async(
+            self._export_selected_dialog(
+                session.session_name,
+                candidate,
+                progress_callback=progress_writer.update,
+            )
+        )
 
         self.last_export_summary = summary
+        logger.info(
+            "Completed export run_id=%s exported=%d warnings=%d",
+            summary.run_id,
+            summary.exported_count,
+            len(summary.warnings),
+        )
         self.printer("")
         for line in _detailed_export_status(summary):
             self.printer(line)

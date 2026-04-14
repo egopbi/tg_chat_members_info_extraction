@@ -12,12 +12,12 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 def main() -> int:
-    from .ui import main as _ui_main
-
     runtime_log = configure_runtime_logging(_PROJECT_ROOT / ".runtime")
     _logger.info("Application startup")
     _logger.debug("Runtime log file: %s", runtime_log)
     try:
+        from .ui import main as _ui_main
+
         exit_code = _ui_main()
     except Exception:
         _logger.exception("Application crashed")

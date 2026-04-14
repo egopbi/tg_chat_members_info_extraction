@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterable
@@ -14,6 +15,8 @@ from typing import Any, Protocol
 from .avatar_store import AvatarStore
 from .csv_writer import CSVWriter, CsvExportRow
 from .models import FieldResult, RetryPolicy
+
+logger = logging.getLogger(__name__)
 
 
 class ParticipantLike(Protocol):
@@ -75,6 +78,7 @@ class ExportProgressSnapshot:
     skipped: int
     deduplicated: int
     failed: int
+    observed: int = 0
     is_final: bool = False
 
 
@@ -105,6 +109,7 @@ def _emit_progress(
     run_id: str,
     total: int | None,
     processed: int,
+    observed: int,
     exported: int,
     skipped: int,
     deduplicated: int,
@@ -118,6 +123,7 @@ def _emit_progress(
             run_id=run_id,
             total=total,
             processed=processed,
+            observed=observed,
             exported=exported,
             skipped=skipped,
             deduplicated=deduplicated,
@@ -237,6 +243,7 @@ def _retry_wait_seconds(
 async def _retry_async(
     action: Callable[[], Any],
     *,
+    action_name: str,
     policy: RetryPolicy,
     sleep: Callable[[float], Any] = asyncio.sleep,
     jitter: Callable[[float], float] | None = None,
@@ -247,16 +254,25 @@ async def _retry_async(
             return await action()
         except Exception as exc:  # pragma: no cover - exercised by tests through fakes
             if not _is_retryable_exception(exc) or waits_used >= policy.max_waits:
+                logger.exception("%s failed without a retry path", action_name)
                 raise
             waits_used += 1
-            await sleep(
-                _retry_wait_seconds(
-                    exc,
-                    policy=policy,
-                    waits_used=waits_used,
-                    jitter=jitter,
-                )
+            wait_seconds = _retry_wait_seconds(
+                exc,
+                policy=policy,
+                waits_used=waits_used,
+                jitter=jitter,
             )
+            logger.warning(
+                "%s hit %s and will retry in %.2fs (attempt %d/%d)",
+                action_name,
+                type(exc).__name__,
+                wait_seconds,
+                waits_used,
+                policy.max_waits,
+                exc_info=True,
+            )
+            await sleep(wait_seconds)
 
 
 async def _iter_participants_with_retry(
@@ -275,20 +291,35 @@ async def _iter_participants_with_retry(
             return
         except Exception as exc:  # pragma: no cover - exercised by tests through fakes
             if not _is_retryable_exception(exc) or waits_used >= policy.max_waits:
+                logger.exception("Participant iteration failed without a retry path")
                 raise
             waits_used += 1
-            await sleep(
-                _retry_wait_seconds(
-                    exc,
-                    policy=policy,
-                    waits_used=waits_used,
-                    jitter=jitter,
-                )
+            wait_seconds = _retry_wait_seconds(
+                exc,
+                policy=policy,
+                waits_used=waits_used,
+                jitter=jitter,
             )
+            logger.warning(
+                "Participant iteration hit %s and will retry in %.2fs (attempt %d/%d)",
+                type(exc).__name__,
+                wait_seconds,
+                waits_used,
+                policy.max_waits,
+                exc_info=True,
+            )
+            await sleep(wait_seconds)
 
 
 async def _current_user_id(gateway: TelegramGateway, *, policy: RetryPolicy, sleep: Callable[[float], Any], jitter: Callable[[float], float] | None) -> int:
-    me = await _retry_async(lambda: gateway.get_me(), policy=policy, sleep=sleep, jitter=jitter)
+    logger.debug("Fetching current Telegram account id")
+    me = await _retry_async(
+        lambda: gateway.get_me(),
+        action_name="Fetch current Telegram account",
+        policy=policy,
+        sleep=sleep,
+        jitter=jitter,
+    )
     return _extract_user_id(me)
 
 
@@ -311,13 +342,23 @@ async def _resolve_linked_channel_url(
     try:
         channel = await _retry_async(
             lambda: gateway.get_entity(linked_channel_id),
+            action_name=f"Resolve linked channel for {linked_channel_id}",
             policy=policy,
             sleep=sleep,
             jitter=jitter,
         )
     except Exception as exc:
         if _is_unavailable_exception(exc):
+            logger.info(
+                "Linked channel %s is unavailable for the current user",
+                linked_channel_id,
+            )
             return FieldResult.unavailable()
+        logger.warning(
+            "Failed to resolve linked channel %s",
+            linked_channel_id,
+            exc_info=True,
+        )
         return FieldResult.error(str(exc))
 
     username = _clean_text(getattr(channel, "username", None))
@@ -348,13 +389,16 @@ async def _download_avatar(
     try:
         downloaded = await _retry_async(
             lambda: gateway.download_profile_photo(user, target_path),
+            action_name=f"Download avatar for user {user_id}",
             policy=policy,
             sleep=sleep,
             jitter=jitter,
         )
     except Exception as exc:
         if _is_unavailable_exception(exc):
+            logger.info("Avatar is unavailable for user %s", user_id)
             return FieldResult.unavailable()
+        logger.warning("Avatar download failed for user %s", user_id, exc_info=True)
         return FieldResult.error(str(exc))
 
     if downloaded is None:
@@ -376,16 +420,19 @@ async def _build_row(
     first_name = _clean_text(getattr(participant, "first_name", None))
     last_name = _clean_text(getattr(participant, "last_name", None))
     username = _clean_text(getattr(participant, "username", None))
+    logger.debug("Building export row for user %s (%s)", user_id, username or "no username")
 
     try:
         full_user = await _retry_async(
             lambda: gateway.get_full_user(participant),
+            action_name=f"Fetch full profile for user {user_id}",
             policy=policy,
             sleep=sleep,
             jitter=jitter,
         )
     except Exception as exc:
         if _is_unavailable_exception(exc):
+            logger.info("Profile fields are unavailable for user %s", user_id)
             return (
                 MemberExportRow(
                     user_id=user_id,
@@ -408,6 +455,7 @@ async def _build_row(
                 f"user {user_id}: profile fields unavailable ({exc})",
                 False,
             )
+        logger.warning("Profile field enrichment failed for user %s", user_id, exc_info=True)
         return (
             MemberExportRow(
                 user_id=user_id,
@@ -454,6 +502,9 @@ async def _build_row(
     warning = None
     if failed:
         warning = f"user {user_id}: one or more enrichments failed"
+        logger.warning("One or more enrichments failed for user %s", user_id)
+    else:
+        logger.debug("Finished export row for user %s", user_id)
 
     return (
         MemberExportRow(
@@ -499,11 +550,21 @@ async def export_members(
     failed_user_ids: list[int] = []
     exported_rows: list[MemberExportRow] = []
     seen_user_ids: set[int] = set()
+    progress_seen_user_ids: set[int] = set()
+    progress_counted_current_user = False
     total_seen = 0
+    processed_unique = 0
     skipped_current = 0
     deduplicated = 0
     exported_count = 0
     failed_count = 0
+
+    logger.info(
+        "Starting member export run_id=%s chat_label=%r expected_total=%s",
+        run_id,
+        chat_label,
+        expected_total,
+    )
 
     current_user_id = await _current_user_id(
         gateway,
@@ -517,6 +578,7 @@ async def export_members(
         run_id=run_id,
         total=expected_total,
         processed=0,
+        observed=0,
         exported=0,
         skipped=0,
         deduplicated=0,
@@ -534,12 +596,22 @@ async def export_members(
             total_seen += 1
             user_id = _extract_user_id(participant)
             if user_id == current_user_id:
+                if not progress_counted_current_user:
+                    progress_counted_current_user = True
+                    processed_unique += 1
+            elif user_id not in progress_seen_user_ids:
+                progress_seen_user_ids.add(user_id)
+                processed_unique += 1
+
+            if user_id == current_user_id:
                 skipped_current += 1
+                logger.debug("Skipping current account user_id=%s", user_id)
                 _emit_progress(
                     progress_callback,
                     run_id=run_id,
                     total=expected_total,
-                    processed=total_seen,
+                    processed=processed_unique,
+                    observed=total_seen,
                     exported=exported_count,
                     skipped=skipped_current,
                     deduplicated=deduplicated,
@@ -548,11 +620,13 @@ async def export_members(
                 continue
             if user_id in seen_user_ids:
                 deduplicated += 1
+                logger.debug("Skipping duplicate participant user_id=%s", user_id)
                 _emit_progress(
                     progress_callback,
                     run_id=run_id,
                     total=expected_total,
-                    processed=total_seen,
+                    processed=processed_unique,
+                    observed=total_seen,
                     exported=exported_count,
                     skipped=skipped_current,
                     deduplicated=deduplicated,
@@ -579,12 +653,19 @@ async def export_members(
             if failed:
                 failed_user_ids.append(user_id)
                 failed_count += 1
+            logger.debug(
+                "Processed participant user_id=%s exported_count=%d failed=%s",
+                user_id,
+                exported_count,
+                failed,
+            )
 
             _emit_progress(
                 progress_callback,
                 run_id=run_id,
                 total=expected_total,
-                processed=total_seen,
+                processed=processed_unique,
+                observed=total_seen,
                 exported=exported_count,
                 skipped=skipped_current,
                 deduplicated=deduplicated,
@@ -592,20 +673,32 @@ async def export_members(
             )
     except Exception as exc:
         warnings.append(f"participant iteration stopped after retries: {exc}")
+        logger.exception("Participant iteration stopped after retries")
 
     try:
+        logger.info("Writing export CSV to %s", csv_path)
         writer.write(csv_path, [row.to_csv_row() for row in exported_rows])
     finally:
         _emit_progress(
             progress_callback,
             run_id=run_id,
             total=expected_total,
-            processed=total_seen,
+            processed=processed_unique,
+            observed=total_seen,
             exported=exported_count,
             skipped=skipped_current,
             deduplicated=deduplicated,
             failed=failed_count,
             is_final=True,
+        )
+        logger.info(
+            "Finished member export run_id=%s exported=%d failed=%d skipped=%d deduplicated=%d total_seen=%d",
+            run_id,
+            exported_count,
+            failed_count,
+            skipped_current,
+            deduplicated,
+            total_seen,
         )
 
     return ExportSummary(
