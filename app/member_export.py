@@ -1,0 +1,473 @@
+"""Best-effort member export orchestration."""
+
+from __future__ import annotations
+
+import asyncio
+import random
+import uuid
+from collections.abc import AsyncIterator, Callable, Iterable
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
+from pathlib import Path
+from typing import Any, Protocol
+
+from .avatar_store import AvatarStore
+from .csv_writer import CSVWriter, CsvExportRow
+from .models import FieldResult, RetryPolicy
+
+
+class ParticipantLike(Protocol):
+    id: int
+    first_name: str | None
+    last_name: str | None
+    username: str | None
+    photo: Any | None
+
+
+class FullUserLike(Protocol):
+    about: str | None
+    birthday: Any | None
+    personal_channel_id: int | None
+
+
+class TelegramGateway(Protocol):
+    async def get_me(self) -> Any: ...
+
+    def iter_participants(self, chat: Any) -> AsyncIterator[ParticipantLike]: ...
+
+    async def get_full_user(self, user: ParticipantLike) -> FullUserLike: ...
+
+    async def get_entity(self, peer: Any) -> Any: ...
+
+    async def download_profile_photo(self, entity: Any, file: Path) -> str | None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class MemberExportRow:
+    user_id: int
+    first_name: str
+    last_name: str
+    username: str
+    about: FieldResult[str]
+    birthday: FieldResult[str]
+    photo_path: FieldResult[str]
+    linked_channel_url: FieldResult[str]
+
+    def to_csv_row(self) -> CsvExportRow:
+        return CsvExportRow(
+            user_id=self.user_id,
+            first_name=self.first_name,
+            last_name=self.last_name,
+            username=self.username,
+            about=self.about,
+            birthday=self.birthday,
+            photo_path=self.photo_path,
+            linked_channel_url=self.linked_channel_url,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ExportSummary:
+    run_id: str
+    chat_label: str | None
+    current_user_id: int
+    csv_path: Path
+    avatars_dir: Path
+    rows: tuple[MemberExportRow, ...]
+    total_seen: int
+    exported_count: int
+    skipped_current_account: int
+    deduplicated_count: int
+    failed_user_ids: tuple[int, ...]
+    warnings: tuple[str, ...]
+
+
+def _now_run_id() -> str:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return f"{timestamp}-{uuid.uuid4().hex[:8]}"
+
+
+def _clean_text(value: Any) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    return text
+
+
+def _extract_user_id(user: Any) -> int:
+    user_id = getattr(user, "id", None)
+    if not isinstance(user_id, int) or user_id <= 0:
+        raise ValueError("participant is missing a valid user id")
+    return user_id
+
+
+def _text_result(value: Any, *, unavailable_if_missing: bool = False) -> FieldResult[str]:
+    text = _clean_text(value)
+    if text:
+        return FieldResult.from_value(text)
+    return FieldResult.unavailable() if unavailable_if_missing else FieldResult.empty()
+
+
+def _birthday_to_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, date):
+        return value.isoformat()
+    day = getattr(value, "day", None)
+    month = getattr(value, "month", None)
+    year = getattr(value, "year", None)
+    if day is None or month is None:
+        return str(value).strip()
+    if year is not None:
+        return f"{int(year):04d}-{int(month):02d}-{int(day):02d}"
+    return f"{int(month):02d}-{int(day):02d}"
+
+
+def _birthday_result(value: Any) -> FieldResult[str]:
+    text = _birthday_to_text(value)
+    return FieldResult.from_value(text) if text else FieldResult.empty()
+
+
+def _explicit_wait_seconds(exc: Exception) -> float | None:
+    for attr in ("seconds", "value", "wait_seconds", "retry_after"):
+        raw = getattr(exc, attr, None)
+        if isinstance(raw, (int, float)) and raw > 0:
+            return float(raw)
+    return None
+
+
+def _is_retryable_exception(exc: Exception) -> bool:
+    explicit_wait = _explicit_wait_seconds(exc)
+    if explicit_wait is not None:
+        return True
+    name = type(exc).__name__.lower()
+    return any(
+        token in name
+        for token in (
+            "floodwait",
+            "floodpremiumwait",
+            "slowmodewait",
+            "timeout",
+            "connection",
+            "network",
+        )
+    )
+
+
+def _is_unavailable_exception(exc: Exception) -> bool:
+    if isinstance(exc, (PermissionError, LookupError, AttributeError)):
+        return True
+    name = type(exc).__name__.lower()
+    return any(
+        token in name
+        for token in (
+            "private",
+            "forbidden",
+            "unauthorized",
+            "access",
+            "notfound",
+            "not_found",
+            "notparticipant",
+            "not_participant",
+            "unavailable",
+        )
+    )
+
+
+async def _retry_async(
+    action: Callable[[], Any],
+    *,
+    policy: RetryPolicy,
+    sleep: Callable[[float], Any] = asyncio.sleep,
+    jitter: Callable[[float], float] | None = None,
+) -> Any:
+    waits_used = 0
+    while True:
+        try:
+            return await action()
+        except Exception as exc:  # pragma: no cover - exercised by tests through fakes
+            if not _is_retryable_exception(exc) or waits_used >= policy.max_waits:
+                raise
+            waits_used += 1
+            explicit_wait = _explicit_wait_seconds(exc)
+            if explicit_wait is not None:
+                wait_seconds = min(explicit_wait, policy.max_wait_seconds)
+            else:
+                base_wait = policy.wait_seconds_for_attempt(waits_used)
+                jitter_fn = jitter or (lambda upper: random.uniform(0.0, upper))
+                wait_seconds = min(
+                    policy.max_wait_seconds,
+                    base_wait + jitter_fn(min(base_wait / 2, 0.5)),
+                )
+            await sleep(wait_seconds)
+
+
+async def _current_user_id(gateway: TelegramGateway, *, policy: RetryPolicy, sleep: Callable[[float], Any], jitter: Callable[[float], float] | None) -> int:
+    me = await _retry_async(lambda: gateway.get_me(), policy=policy, sleep=sleep, jitter=jitter)
+    return _extract_user_id(me)
+
+
+def _display_name(user: ParticipantLike) -> str:
+    parts = [_clean_text(getattr(user, "first_name", None)), _clean_text(getattr(user, "last_name", None))]
+    return " ".join(part for part in parts if part).strip()
+
+
+async def _resolve_linked_channel_url(
+    gateway: TelegramGateway,
+    full_user: FullUserLike,
+    *,
+    policy: RetryPolicy,
+    sleep: Callable[[float], Any],
+    jitter: Callable[[float], float] | None,
+) -> FieldResult[str]:
+    linked_channel_id = getattr(full_user, "personal_channel_id", None)
+    if linked_channel_id is None:
+        return FieldResult.unavailable()
+    try:
+        channel = await _retry_async(
+            lambda: gateway.get_entity(linked_channel_id),
+            policy=policy,
+            sleep=sleep,
+            jitter=jitter,
+        )
+    except Exception as exc:
+        if _is_unavailable_exception(exc):
+            return FieldResult.unavailable()
+        return FieldResult.error(str(exc))
+
+    username = _clean_text(getattr(channel, "username", None))
+    if not username:
+        return FieldResult.empty()
+    return FieldResult.from_value(f"https://t.me/{username}")
+
+
+async def _download_avatar(
+    gateway: TelegramGateway,
+    avatar_store: AvatarStore,
+    run_id: str,
+    user: ParticipantLike,
+    *,
+    policy: RetryPolicy,
+    sleep: Callable[[float], Any],
+    jitter: Callable[[float], float] | None,
+) -> FieldResult[str]:
+    if not getattr(user, "photo", None):
+        return FieldResult.empty()
+    user_id = _extract_user_id(user)
+    target_path = avatar_store.avatar_path(
+        run_id,
+        user_id,
+        username=_clean_text(getattr(user, "username", None)) or None,
+        display_name=_display_name(user) or None,
+    )
+    try:
+        downloaded = await _retry_async(
+            lambda: gateway.download_profile_photo(user, target_path),
+            policy=policy,
+            sleep=sleep,
+            jitter=jitter,
+        )
+    except Exception as exc:
+        if _is_unavailable_exception(exc):
+            return FieldResult.unavailable()
+        return FieldResult.error(str(exc))
+
+    if downloaded is None:
+        return FieldResult.unavailable()
+    return FieldResult.from_value(str(downloaded))
+
+
+async def _build_row(
+    gateway: TelegramGateway,
+    participant: ParticipantLike,
+    *,
+    run_id: str,
+    avatar_store: AvatarStore,
+    policy: RetryPolicy,
+    sleep: Callable[[float], Any],
+    jitter: Callable[[float], float] | None,
+) -> tuple[MemberExportRow | None, str | None, bool]:
+    user_id = _extract_user_id(participant)
+    first_name = _clean_text(getattr(participant, "first_name", None))
+    last_name = _clean_text(getattr(participant, "last_name", None))
+    username = _clean_text(getattr(participant, "username", None))
+
+    try:
+        full_user = await _retry_async(
+            lambda: gateway.get_full_user(participant),
+            policy=policy,
+            sleep=sleep,
+            jitter=jitter,
+        )
+    except Exception as exc:
+        if _is_unavailable_exception(exc):
+            return (
+                MemberExportRow(
+                    user_id=user_id,
+                    first_name=first_name,
+                    last_name=last_name,
+                    username=username,
+                    about=FieldResult.unavailable(),
+                    birthday=FieldResult.unavailable(),
+                    photo_path=await _download_avatar(
+                        gateway,
+                        avatar_store,
+                        run_id,
+                        participant,
+                        policy=policy,
+                        sleep=sleep,
+                        jitter=jitter,
+                    ),
+                    linked_channel_url=FieldResult.unavailable(),
+                ),
+                f"user {user_id}: profile fields unavailable ({exc})",
+                False,
+            )
+        return (
+            MemberExportRow(
+                user_id=user_id,
+                first_name=first_name,
+                last_name=last_name,
+                username=username,
+                about=FieldResult.error(str(exc)),
+                birthday=FieldResult.error(str(exc)),
+                photo_path=await _download_avatar(
+                    gateway,
+                    avatar_store,
+                    run_id,
+                    participant,
+                    policy=policy,
+                    sleep=sleep,
+                    jitter=jitter,
+                ),
+                linked_channel_url=FieldResult.error(str(exc)),
+            ),
+            f"user {user_id}: profile fields failed ({exc})",
+            True,
+        )
+
+    about = _text_result(getattr(full_user, "about", None))
+    birthday = _birthday_result(getattr(full_user, "birthday", None))
+    linked_channel_url = await _resolve_linked_channel_url(
+        gateway,
+        full_user,
+        policy=policy,
+        sleep=sleep,
+        jitter=jitter,
+    )
+    photo_path = await _download_avatar(
+        gateway,
+        avatar_store,
+        run_id,
+        participant,
+        policy=policy,
+        sleep=sleep,
+        jitter=jitter,
+    )
+
+    failed = any(result.status == "error" for result in (about, birthday, linked_channel_url, photo_path))
+    warning = None
+    if failed:
+        warning = f"user {user_id}: one or more enrichments failed"
+
+    return (
+        MemberExportRow(
+            user_id=user_id,
+            first_name=first_name,
+            last_name=last_name,
+            username=username,
+            about=about,
+            birthday=birthday,
+            photo_path=photo_path,
+            linked_channel_url=linked_channel_url,
+        ),
+        warning,
+        failed,
+    )
+
+
+async def export_members(
+    gateway: TelegramGateway,
+    chat: Any,
+    *,
+    run_id: str | None = None,
+    runtime_dir: Path | str = ".runtime",
+    csv_writer: CSVWriter | None = None,
+    avatar_store: AvatarStore | None = None,
+    retry_policy: RetryPolicy | None = None,
+    sleep: Callable[[float], Any] = asyncio.sleep,
+    jitter: Callable[[float], float] | None = None,
+    chat_label: str | None = None,
+) -> ExportSummary:
+    policy = retry_policy or RetryPolicy()
+    store = avatar_store or AvatarStore(runtime_dir)
+    writer = csv_writer or CSVWriter()
+    run_id = run_id or _now_run_id()
+
+    avatars_dir = store.avatars_dir(run_id)
+    csv_path = store.run_dir(run_id) / "members.csv"
+    warnings: list[str] = []
+    failed_user_ids: list[int] = []
+    exported_rows: list[MemberExportRow] = []
+    seen_user_ids: set[int] = set()
+    total_seen = 0
+    skipped_current = 0
+    deduplicated = 0
+
+    current_user_id = await _current_user_id(
+        gateway,
+        policy=policy,
+        sleep=sleep,
+        jitter=jitter,
+    )
+
+    try:
+        async for participant in gateway.iter_participants(chat):
+            total_seen += 1
+            user_id = _extract_user_id(participant)
+            if user_id == current_user_id:
+                skipped_current += 1
+                continue
+            if user_id in seen_user_ids:
+                deduplicated += 1
+                continue
+            seen_user_ids.add(user_id)
+
+            row, warning, failed = await _build_row(
+                gateway,
+                participant,
+                run_id=run_id,
+                avatar_store=store,
+                policy=policy,
+                sleep=sleep,
+                jitter=jitter,
+            )
+            if row is None:
+                continue
+            exported_rows.append(row)
+            if warning:
+                warnings.append(warning)
+            if failed:
+                failed_user_ids.append(user_id)
+    except Exception as exc:
+        warnings.append(f"participant iteration stopped early: {exc}")
+
+    writer.write(csv_path, [row.to_csv_row() for row in exported_rows])
+
+    return ExportSummary(
+        run_id=run_id,
+        chat_label=chat_label,
+        current_user_id=current_user_id,
+        csv_path=csv_path,
+        avatars_dir=avatars_dir,
+        rows=tuple(exported_rows),
+        total_seen=total_seen,
+        exported_count=len(exported_rows),
+        skipped_current_account=skipped_current,
+        deduplicated_count=deduplicated,
+        failed_user_ids=tuple(failed_user_ids),
+        warnings=tuple(warnings),
+    )
+
