@@ -30,7 +30,7 @@
 Если вы используете `git`:
 
 ```bash
-git clone <URL_репозитория>
+git clone git@github.com:egopbi/tg_chat_members_info_extraction.git
 cd tg_chat_members_info_extraction
 ```
 
