@@ -1,0 +1,140 @@
+"""Telethon gateway helpers used by the session service and future export flows."""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any, TypeVar
+
+from telethon import TelegramClient, errors
+
+from .models import RetryPolicy
+from .state_store import StateStore
+
+T = TypeVar("T")
+
+
+class TelegramGatewayError(RuntimeError):
+    """Raised when the gateway cannot satisfy a requested Telegram operation."""
+
+
+class TelegramGateway:
+    def __init__(
+        self,
+        state_store: StateStore,
+        *,
+        retry_policy: RetryPolicy | None = None,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
+        self.state_store = state_store
+        self.retry_policy = retry_policy or RetryPolicy()
+        self._sleep = sleep
+
+    def session_path(self, session_name: str) -> Path:
+        return self.state_store.session_artifact_path(session_name)
+
+    def build_client(
+        self,
+        session_name: str,
+        api_id: int,
+        api_hash: str,
+        **client_kwargs: Any,
+    ) -> TelegramClient:
+        kwargs = {
+            "flood_sleep_threshold": 0,
+            "request_retries": 0,
+            "connection_retries": 0,
+            "auto_reconnect": False,
+        }
+        kwargs.update(client_kwargs)
+        return TelegramClient(self.session_path(session_name), api_id, api_hash, **kwargs)
+
+    @asynccontextmanager
+    async def open_client(
+        self,
+        session_name: str,
+        api_id: int,
+        api_hash: str,
+        **client_kwargs: Any,
+    ) -> AsyncIterator[TelegramClient]:
+        client = self.build_client(session_name, api_id, api_hash, **client_kwargs)
+        try:
+            await self.run_with_retry(
+                client.connect,
+                operation_name=f"connect Telegram session {session_name!r}",
+            )
+            yield client
+        finally:
+            if client.is_connected():
+                await client.disconnect()
+
+    @staticmethod
+    def is_retryable_error(error: BaseException) -> bool:
+        if isinstance(error, (ConnectionError, OSError, TimeoutError)):
+            return True
+        name = error.__class__.__name__
+        return name.endswith("WaitError") or name in {"ServerError", "TimedOutError"}
+
+    async def run_with_retry(
+        self,
+        operation: Callable[[], Awaitable[T]],
+        *,
+        operation_name: str = "Telegram operation",
+        retry_policy: RetryPolicy | None = None,
+    ) -> T:
+        policy = retry_policy or self.retry_policy
+        waits_used = 0
+        attempt_number = 1
+
+        while True:
+            try:
+                return await operation()
+            except Exception as error:
+                if not self.is_retryable_error(error) or waits_used >= policy.max_waits:
+                    raise
+
+                delay = policy.wait_seconds_for_attempt(attempt_number)
+                seconds = getattr(error, "seconds", None)
+                if isinstance(seconds, (int, float)) and seconds > 0:
+                    delay = max(delay, float(seconds))
+                await self._sleep(delay)
+                waits_used += 1
+                attempt_number += 1
+
+    async def ensure_authorized(self, client: TelegramClient) -> None:
+        authorized = await self.run_with_retry(
+            client.is_user_authorized,
+            operation_name="check Telegram authorization",
+        )
+        if not authorized:
+            raise TelegramGatewayError("Telegram client is not authorized")
+
+    async def get_current_user(self, client: TelegramClient) -> Any:
+        return await self.run_with_retry(
+            client.get_me,
+            operation_name="fetch current Telegram account",
+        )
+
+    async def request_login_code(
+        self,
+        client: TelegramClient,
+        phone: str,
+        *,
+        force_sms: bool = False,
+    ) -> Any:
+        return await self.run_with_retry(
+            lambda: client.send_code_request(phone, force_sms=force_sms),
+            operation_name="request Telegram login code",
+        )
+
+    async def sign_in(
+        self,
+        client: TelegramClient,
+        **kwargs: Any,
+    ) -> Any:
+        return await self.run_with_retry(
+            lambda: client.sign_in(**kwargs),
+            operation_name="complete Telegram login",
+        )

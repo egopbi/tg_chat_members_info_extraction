@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any, Generic, Literal, TypeVar
 
 FieldStatus = Literal["value", "empty", "unavailable", "error"]
+DialogEntityType = Literal["group", "supergroup", "forum"]
 T = TypeVar("T")
 
 
@@ -200,6 +201,64 @@ class ActiveSessionState:
         return cls(
             session_name=payload["session_name"],
             updated_at=_datetime_from_text(payload["updated_at"], "updated_at"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class DialogCandidate:
+    title: str
+    entity_type: DialogEntityType
+    peer_id: int
+    username: str | None = None
+    participants_count: int | None = None
+    last_message_date: datetime | None = None
+
+    def __post_init__(self) -> None:
+        if not self.title.strip():
+            raise ValueError("title must not be empty")
+        if self.entity_type not in {"group", "supergroup", "forum"}:
+            raise ValueError(f"Unsupported entity type: {self.entity_type}")
+        if self.peer_id == 0:
+            raise ValueError("peer_id must be non-zero")
+        if self.username is not None and not self.username.strip():
+            raise ValueError("username must not be blank")
+        if self.participants_count is not None and self.participants_count < 0:
+            raise ValueError("participants_count must be non-negative")
+        if self.last_message_date is not None:
+            _ensure_aware(self.last_message_date, "last_message_date")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "title": self.title,
+            "entity_type": self.entity_type,
+            "peer_id": self.peer_id,
+            "username": self.username,
+            "participants_count": self.participants_count,
+            "last_message_date": (
+                _datetime_to_text(self.last_message_date)
+                if self.last_message_date is not None
+                else None
+            ),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "DialogCandidate":
+        last_message_date = payload.get("last_message_date")
+        return cls(
+            title=payload["title"],
+            entity_type=payload["entity_type"],
+            peer_id=int(payload["peer_id"]),
+            username=payload.get("username"),
+            participants_count=(
+                int(payload["participants_count"])
+                if payload.get("participants_count") is not None
+                else None
+            ),
+            last_message_date=(
+                _datetime_from_text(last_message_date, "last_message_date")
+                if last_message_date is not None
+                else None
+            ),
         )
 
 

@@ -24,8 +24,12 @@ def test_state_store_persists_sessions_and_active_state(tmp_path: Path) -> None:
     store.save_session(session)
     active_state = store.set_active_session(session.session_name)
 
-    assert store.load_session(session.session_name) == session
-    assert store.list_sessions() == [session]
+    loaded_session = store.load_session(session.session_name)
+    listed_sessions = store.list_sessions()
+
+    assert loaded_session.session_name == session.session_name
+    assert loaded_session.is_active is True
+    assert listed_sessions == [loaded_session]
     assert store.load_active_session() == active_state
     assert active_state.session_name == session.session_name
 
@@ -40,10 +44,11 @@ def test_state_store_persists_sessions_and_active_state(tmp_path: Path) -> None:
     if os.name == "posix":
         assert stat.S_IMODE(runtime_dir.stat().st_mode) == 0o700
         assert stat.S_IMODE(session_meta_dir.stat().st_mode) == 0o700
+        assert stat.S_IMODE((runtime_dir / "sessions").stat().st_mode) == 0o700
         assert stat.S_IMODE(session_file.stat().st_mode) == 0o600
-        assert stat.S_IMODE((session_meta_dir / "active_session.json").stat().st_mode) == 0o600
+        assert stat.S_IMODE((runtime_dir / "active_session.json").stat().st_mode) == 0o600
 
-    assert not (runtime_dir / "sessions").exists()
+    assert (runtime_dir / "sessions").exists()
 
 
 def test_state_store_clears_active_session(tmp_path: Path) -> None:
