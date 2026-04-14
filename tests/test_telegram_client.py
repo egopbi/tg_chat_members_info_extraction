@@ -7,6 +7,7 @@ from urllib.parse import quote
 
 import pytest
 from telethon import errors
+from telethon.tl import types
 
 from app.member_export import export_members
 from app.models import RetryPolicy
@@ -61,11 +62,17 @@ def test_concrete_gateway_adapter_is_wireable_to_export_members(tmp_path: Path) 
     async def run() -> None:
         store = StateStore(tmp_path / ".runtime")
         gateway = TelegramGateway(store)
-        client = gateway.build_client("session-one", 123456, "hash")
-
-        current_user = SimpleNamespace(id=1, username="current")
-        participant = SimpleNamespace(
+        
+        current_user = types.User(
+            id=1,
+            is_self=True,
+            first_name="Current",
+            username="current",
+        )
+        participant = types.User(
             id=2,
+            is_self=False,
+            access_hash=222,
             first_name="Alice",
             last_name="Example",
             username="alice",
@@ -78,33 +85,34 @@ def test_concrete_gateway_adapter_is_wireable_to_export_members(tmp_path: Path) 
         )
         linked_channel = SimpleNamespace(username="alice-channel")
 
-        async def get_me() -> object:
-            return current_user
+        class FallbackClient:
+            async def get_me(self) -> object:
+                return current_user
 
-        def iter_participants(chat: object):
-            async def generator():
-                yield current_user
-                yield participant
+            def iter_participants(self, chat: object):
+                async def generator():
+                    yield current_user
+                    yield participant
 
-            return generator()
+                return generator()
 
-        async def get_full_user(user: object) -> object:
-            return full_user
+            async def __call__(self, request: object) -> object:
+                assert request.__class__.__name__ == "GetFullUserRequest"
+                return SimpleNamespace(full_user=full_user)
 
-        async def get_entity(peer: object) -> object:
-            return linked_channel
+            async def get_entity(self, peer: object) -> object:
+                return linked_channel
 
-        async def download_profile_photo(entity: object, file: Path) -> str:
-            file.write_bytes(b"avatar-bytes")
-            return str(file)
+            async def download_profile_photo(self, entity: object, file: Path) -> str:
+                file.write_bytes(b"avatar-bytes")
+                return str(file)
 
-        setattr(client, "get_me", get_me)
-        setattr(client, "iter_participants", iter_participants)
-        setattr(client, "get_full_user", get_full_user)
-        setattr(client, "get_entity", get_entity)
-        setattr(client, "download_profile_photo", download_profile_photo)
+        client = FallbackClient()
 
         adapter = gateway.bind_client(client)
+
+        full_user_result = await adapter.get_full_user(participant)
+        assert full_user_result is full_user
 
         summary = await export_members(
             adapter,

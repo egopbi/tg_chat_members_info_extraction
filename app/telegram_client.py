@@ -176,7 +176,9 @@ class TelegramClientAdapter:
         if callable(custom_getter):
             return await custom_getter(user)
         input_user = utils.get_input_user(user)
-        return await self.client(functions.users.GetFullUserRequest(input_user))
+        response = await self.client(functions.users.GetFullUserRequest(input_user))
+        full_user = getattr(response, "full_user", response)
+        return full_user if full_user is not None else response
 
     async def get_entity(self, peer: Any) -> Any:
         return await self.client.get_entity(peer)
