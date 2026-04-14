@@ -3,11 +3,22 @@
 from __future__ import annotations
 
 import csv
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
 
 from .models import FieldResult
+
+PRIVATE_DIRECTORY_MODE = 0o700
+PRIVATE_FILE_MODE = 0o600
+
+
+def _best_effort_chmod(path: Path, mode: int) -> None:
+    try:
+        path.chmod(mode)
+    except OSError:
+        pass
 
 CSV_COLUMNS = [
     "user_id",
@@ -70,10 +81,13 @@ class CSVWriter:
 
     def write(self, path: Path, rows: Sequence[CsvExportRow] | Iterable[CsvExportRow]) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
+        if os.name == "posix":
+            _best_effort_chmod(path.parent, PRIVATE_DIRECTORY_MODE)
         with path.open("w", encoding=self.encoding, newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=CSV_COLUMNS, delimiter=self.delimiter)
             writer.writeheader()
             for row in rows:
                 writer.writerow(row_to_dict(row))
+        if os.name == "posix":
+            _best_effort_chmod(path, PRIVATE_FILE_MODE)
         return path
-

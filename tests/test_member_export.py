@@ -63,14 +63,19 @@ class FakeGateway:
         self.download_calls = 0
         self.full_user_calls = 0
         self.retry_failures = 0
+        self.participant_iteration_calls = 0
 
     async def get_me(self) -> FakeParticipant:
         return self.me
 
     def iter_participants(self, chat: object):
+        self.participant_iteration_calls += 1
+
         async def generator():
-            for participant in self.participants:
+            for index, participant in enumerate(self.participants):
                 yield participant
+                if self.participant_iteration_calls == 1 and index == 1:
+                    raise RetryFloodError(seconds=30)
 
         return generator()
 
@@ -81,6 +86,8 @@ class FakeGateway:
             if self.retry_failures <= 4:
                 raise RetryFloodError(seconds=30)
             raise RuntimeError("full user failed permanently")
+        if user.id == 5:
+            raise AttributeError("broken adapter")
         return self.full_users[user.id]
 
     async def get_entity(self, peer: object) -> FakeChannel:
@@ -119,15 +126,15 @@ def test_export_members_is_best_effort_and_summary_rich(tmp_path: Path) -> None:
 
     assert summary.chat_label == "Test Group"
     assert summary.current_user_id == 1
-    assert summary.total_seen == 5
+    assert summary.total_seen == 7
     assert summary.exported_count == 3
-    assert summary.skipped_current_account == 1
-    assert summary.deduplicated_count == 1
+    assert summary.skipped_current_account == 2
+    assert summary.deduplicated_count == 2
     assert summary.failed_user_ids == (4,)
     assert summary.csv_path.exists()
     assert summary.avatars_dir == tmp_path / ".runtime" / "exports" / "run-001" / "avatars"
     assert summary.warnings
-    assert len(sleep_calls) == 8
+    assert len(sleep_calls) == 9
     assert max(sleep_calls) == 4.0
 
     rows = {row.user_id: row for row in summary.rows}
@@ -155,6 +162,7 @@ def test_export_members_is_best_effort_and_summary_rich(tmp_path: Path) -> None:
 def test_export_members_stops_after_four_waits_for_one_operation(tmp_path: Path) -> None:
     gateway = FakeGateway()
     gateway.participants = [gateway.me, FakeParticipant(id=4, first_name="Retry", last_name="User", username="retry", photo=None)]
+    gateway.participant_iteration_calls = 1
 
     sleep_calls: list[float] = []
 
@@ -177,3 +185,62 @@ def test_export_members_stops_after_four_waits_for_one_operation(tmp_path: Path)
     assert len(sleep_calls) == 4
     assert summary.rows[0].about.status == "error"
     assert summary.rows[0].photo_path.status == "empty"
+
+
+def test_export_members_retries_participant_enumeration_mid_stream(tmp_path: Path) -> None:
+    gateway = FakeGateway()
+    gateway.participants = [
+        gateway.me,
+        FakeParticipant(id=2, first_name="Alice", last_name="Example", username="alice", photo=object()),
+        FakeParticipant(id=3, first_name="Bob", last_name=None, username=None, photo=None),
+    ]
+
+    sleep_calls: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+    summary = asyncio.run(
+        export_members(
+            gateway,
+            chat=object(),
+            runtime_dir=tmp_path / ".runtime",
+            run_id="run-003",
+            sleep=sleep,
+            jitter=lambda _: 0.0,
+        )
+    )
+
+    assert gateway.participant_iteration_calls == 2
+    assert sleep_calls == [4.0]
+    assert summary.exported_count == 2
+    assert summary.failed_user_ids == ()
+    assert {row.user_id for row in summary.rows} == {2, 3}
+    assert summary.rows[1].photo_path.status == "empty"
+
+
+def test_export_members_treats_attribute_error_as_runtime_error(tmp_path: Path) -> None:
+    gateway = FakeGateway()
+    gateway.participants = [
+        gateway.me,
+        FakeParticipant(id=5, first_name="Broken", last_name="Adapter", username="broken", photo=None),
+    ]
+
+    summary = asyncio.run(
+        export_members(
+            gateway,
+            chat=object(),
+            runtime_dir=tmp_path / ".runtime",
+            run_id="run-004",
+            sleep=lambda _: asyncio.sleep(0),
+            jitter=lambda _: 0.0,
+        )
+    )
+
+    assert summary.exported_count == 1
+    assert summary.failed_user_ids == (5,)
+    row = summary.rows[0]
+    assert row.about.status == "error"
+    assert row.birthday.status == "error"
+    assert row.linked_channel_url.status == "error"
+    assert row.photo_path.status == "empty"

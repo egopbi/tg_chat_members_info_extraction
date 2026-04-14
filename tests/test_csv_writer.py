@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import csv
+import os
+import stat
 from pathlib import Path
 
 from app.csv_writer import CSVWriter
@@ -63,3 +65,6 @@ def test_csv_writer_uses_semicolon_and_utf8_sig(tmp_path: Path) -> None:
         }
     ]
 
+    if os.name == "posix":
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700

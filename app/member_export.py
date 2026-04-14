@@ -157,7 +157,7 @@ def _is_retryable_exception(exc: Exception) -> bool:
 
 
 def _is_unavailable_exception(exc: Exception) -> bool:
-    if isinstance(exc, (PermissionError, LookupError, AttributeError)):
+    if isinstance(exc, (PermissionError, LookupError)):
         return True
     name = type(exc).__name__.lower()
     return any(
@@ -173,6 +173,24 @@ def _is_unavailable_exception(exc: Exception) -> bool:
             "not_participant",
             "unavailable",
         )
+        )
+
+
+def _retry_wait_seconds(
+    exc: Exception,
+    *,
+    policy: RetryPolicy,
+    waits_used: int,
+    jitter: Callable[[float], float] | None,
+) -> float:
+    explicit_wait = _explicit_wait_seconds(exc)
+    if explicit_wait is not None:
+        return min(explicit_wait, policy.max_wait_seconds)
+    base_wait = policy.wait_seconds_for_attempt(waits_used)
+    jitter_fn = jitter or (lambda upper: random.uniform(0.0, upper))
+    return min(
+        policy.max_wait_seconds,
+        base_wait + jitter_fn(min(base_wait / 2, 0.5)),
     )
 
 
@@ -191,17 +209,42 @@ async def _retry_async(
             if not _is_retryable_exception(exc) or waits_used >= policy.max_waits:
                 raise
             waits_used += 1
-            explicit_wait = _explicit_wait_seconds(exc)
-            if explicit_wait is not None:
-                wait_seconds = min(explicit_wait, policy.max_wait_seconds)
-            else:
-                base_wait = policy.wait_seconds_for_attempt(waits_used)
-                jitter_fn = jitter or (lambda upper: random.uniform(0.0, upper))
-                wait_seconds = min(
-                    policy.max_wait_seconds,
-                    base_wait + jitter_fn(min(base_wait / 2, 0.5)),
+            await sleep(
+                _retry_wait_seconds(
+                    exc,
+                    policy=policy,
+                    waits_used=waits_used,
+                    jitter=jitter,
                 )
-            await sleep(wait_seconds)
+            )
+
+
+async def _iter_participants_with_retry(
+    gateway: TelegramGateway,
+    chat: Any,
+    *,
+    policy: RetryPolicy,
+    sleep: Callable[[float], Any],
+    jitter: Callable[[float], float] | None,
+) -> AsyncIterator[ParticipantLike]:
+    waits_used = 0
+    while True:
+        try:
+            async for participant in gateway.iter_participants(chat):
+                yield participant
+            return
+        except Exception as exc:  # pragma: no cover - exercised by tests through fakes
+            if not _is_retryable_exception(exc) or waits_used >= policy.max_waits:
+                raise
+            waits_used += 1
+            await sleep(
+                _retry_wait_seconds(
+                    exc,
+                    policy=policy,
+                    waits_used=waits_used,
+                    jitter=jitter,
+                )
+            )
 
 
 async def _current_user_id(gateway: TelegramGateway, *, policy: RetryPolicy, sleep: Callable[[float], Any], jitter: Callable[[float], float] | None) -> int:
@@ -424,7 +467,13 @@ async def export_members(
     )
 
     try:
-        async for participant in gateway.iter_participants(chat):
+        async for participant in _iter_participants_with_retry(
+            gateway,
+            chat,
+            policy=policy,
+            sleep=sleep,
+            jitter=jitter,
+        ):
             total_seen += 1
             user_id = _extract_user_id(participant)
             if user_id == current_user_id:
@@ -452,7 +501,7 @@ async def export_members(
             if failed:
                 failed_user_ids.append(user_id)
     except Exception as exc:
-        warnings.append(f"participant iteration stopped early: {exc}")
+        warnings.append(f"participant iteration stopped after retries: {exc}")
 
     writer.write(csv_path, [row.to_csv_row() for row in exported_rows])
 
@@ -470,4 +519,3 @@ async def export_members(
         failed_user_ids=tuple(failed_user_ids),
         warnings=tuple(warnings),
     )
-
