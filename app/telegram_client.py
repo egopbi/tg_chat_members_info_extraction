@@ -129,7 +129,7 @@ class TelegramGateway:
                 delay = policy.wait_seconds_for_attempt(attempt_number)
                 seconds = getattr(error, "seconds", None)
                 if isinstance(seconds, (int, float)) and seconds > 0:
-                    delay = max(delay, float(seconds))
+                    delay = float(seconds)
                 logger.warning(
                     "%s hit %s; retrying in %.2fs",
                     operation_name,

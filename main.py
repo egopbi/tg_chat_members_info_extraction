@@ -81,6 +81,39 @@ def _install_requirements(venv_python: Path, requirements_file: Path) -> None:
     )
 
 
+def _ensure_pip(venv_python: Path) -> None:
+    command = [str(venv_python), "-m", "ensurepip", "--upgrade"]
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        if result.stdout.strip():
+            logger.debug("ensurepip stdout:\n%s", result.stdout.strip())
+        if result.stderr.strip():
+            logger.debug("ensurepip stderr:\n%s", result.stderr.strip())
+        return
+
+    if result.stdout.strip():
+        logger.error("ensurepip stdout:\n%s", result.stdout.strip())
+    if result.stderr.strip():
+        logger.error("ensurepip stderr:\n%s", result.stderr.strip())
+    raise subprocess.CalledProcessError(
+        result.returncode,
+        command,
+        output=result.stdout,
+        stderr=result.stderr,
+    )
+
+
+def _is_missing_pip_error(error: subprocess.CalledProcessError) -> bool:
+    stderr = (error.stderr or "").strip()
+    stdout = (error.output or "").strip()
+    message = " ".join(part for part in (stdout, stderr) if part)
+    return "No module named pip" in message
+
+
 def _run_app() -> int:
     import app
 
@@ -151,6 +184,7 @@ def bootstrap(
     current_executable: Path | None = None,
     create_venv: Callable[[Path], None] = _create_venv,
     install_requirements: Callable[[Path, Path], None] = _install_requirements,
+    ensure_pip: Callable[[Path], None] = _ensure_pip,
     run_app: Callable[[], int] = _run_app,
     handoff_to_app: Callable[[Path], None] = _handoff_to_app,
 ) -> int:
@@ -175,7 +209,17 @@ def bootstrap(
 
         if not _requirements_are_current(venv_dir, requirements_file):
             logger.info("Installing requirements from %s", requirements_file)
-            install_requirements(venv_python, requirements_file)
+            try:
+                install_requirements(venv_python, requirements_file)
+            except subprocess.CalledProcessError as exc:
+                if not _is_missing_pip_error(exc):
+                    raise
+                logger.warning(
+                    "Virtual environment at %s is missing pip; repairing with ensurepip",
+                    venv_dir,
+                )
+                ensure_pip(venv_python)
+                install_requirements(venv_python, requirements_file)
             _record_requirements_hash(venv_dir, requirements_file)
 
         if _same_interpreter(venv_python, current_executable=current_executable):

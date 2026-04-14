@@ -135,7 +135,7 @@ def test_export_members_is_best_effort_and_summary_rich(tmp_path: Path) -> None:
     assert summary.avatars_dir == tmp_path / ".runtime" / "exports" / "run-001" / "avatars"
     assert summary.warnings
     assert len(sleep_calls) == 9
-    assert max(sleep_calls) == 4.0
+    assert sleep_calls == [30.0] * 9
 
     rows = {row.user_id: row for row in summary.rows}
     assert rows[2].about.status == "value"
@@ -253,7 +253,7 @@ def test_export_members_stops_after_four_waits_for_one_operation(tmp_path: Path)
 
     assert summary.exported_count == 1
     assert summary.failed_user_ids == (4,)
-    assert len(sleep_calls) == 4
+    assert sleep_calls == [30.0, 30.0, 30.0, 30.0]
     assert summary.rows[0].about.status == "error"
     assert summary.rows[0].photo_path.status == "empty"
 
@@ -283,7 +283,7 @@ def test_export_members_retries_participant_enumeration_mid_stream(tmp_path: Pat
     )
 
     assert gateway.participant_iteration_calls == 2
-    assert sleep_calls == [4.0]
+    assert sleep_calls == [30.0]
     assert summary.exported_count == 2
     assert summary.failed_user_ids == ()
     assert {row.user_id for row in summary.rows} == {2, 3}

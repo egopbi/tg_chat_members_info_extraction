@@ -58,6 +58,39 @@ def test_run_with_retry_caps_waits_at_four(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_run_with_retry_uses_exact_telegram_wait_seconds(tmp_path: Path) -> None:
+    async def run() -> None:
+        store = StateStore(tmp_path / ".runtime")
+        sleeps: list[float] = []
+
+        async def fake_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+
+        gateway = TelegramGateway(
+            store,
+            retry_policy=RetryPolicy(max_waits=4, initial_wait_seconds=1.0, backoff_factor=2.0, max_wait_seconds=4.0),
+            sleep=fake_sleep,
+        )
+
+        attempts = {"count": 0}
+
+        async def operation() -> str:
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                exc = errors.FloodWaitError(None)
+                exc.seconds = 23
+                raise exc
+            return "ok"
+
+        result = await gateway.run_with_retry(operation)
+
+        assert result == "ok"
+        assert attempts["count"] == 2
+        assert sleeps == [23.0]
+
+    asyncio.run(run())
+
+
 def test_concrete_gateway_adapter_is_wireable_to_export_members(tmp_path: Path) -> None:
     async def run() -> None:
         store = StateStore(tmp_path / ".runtime")

@@ -231,7 +231,7 @@ def _retry_wait_seconds(
 ) -> float:
     explicit_wait = _explicit_wait_seconds(exc)
     if explicit_wait is not None:
-        return min(explicit_wait, policy.max_wait_seconds)
+        return explicit_wait
     base_wait = policy.wait_seconds_for_attempt(waits_used)
     jitter_fn = jitter or (lambda upper: random.uniform(0.0, upper))
     return min(

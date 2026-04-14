@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -195,3 +196,53 @@ def test_bootstrap_skips_dependency_installation_when_marker_matches(
 
     assert exit_code == 0
     assert calls == ["handoff"]
+
+
+def test_bootstrap_repairs_missing_pip_and_retries_install(tmp_path: Path) -> None:
+    requirements_file = tmp_path / "requirements.txt"
+    requirements_file.write_text(
+        "Telethon>=1.40,<2\nquestionary>=2,<3\n",
+        encoding="utf-8",
+    )
+    venv_python = tmp_path / ".venv" / "bin" / "python"
+    venv_python.parent.mkdir(parents=True, exist_ok=True)
+    venv_python.write_text("", encoding="utf-8")
+
+    calls: list[tuple[str, Path]] = []
+    attempts = 0
+
+    def install_requirements(python_path: Path, requested_requirements: Path) -> None:
+        nonlocal attempts
+        calls.append(("install", python_path))
+        assert requested_requirements == requirements_file
+        attempts += 1
+        if attempts == 1:
+            raise subprocess.CalledProcessError(
+                1,
+                [str(python_path), "-m", "pip", "install", "-r", str(requested_requirements)],
+                stderr="/tmp/project/.venv/bin/python: No module named pip",
+            )
+
+    def ensure_pip(python_path: Path) -> None:
+        calls.append(("ensure_pip", python_path))
+
+    def handoff_to_app(python_path: Path) -> None:
+        calls.append(("handoff", python_path))
+
+    exit_code = main.bootstrap(
+        project_root=tmp_path,
+        version_info=(3, 10),
+        current_executable=Path("/usr/bin/python3"),
+        install_requirements=install_requirements,
+        ensure_pip=ensure_pip,
+        handoff_to_app=handoff_to_app,
+        run_app=lambda: 0,
+    )
+
+    assert exit_code == 0
+    assert calls == [
+        ("install", venv_python),
+        ("ensure_pip", venv_python),
+        ("install", venv_python),
+        ("handoff", venv_python),
+    ]
