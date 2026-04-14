@@ -16,13 +16,16 @@ except ImportError:  # pragma: no cover - fallback for environments without deps
     questionary = None
     Choice = None
 
+from telethon import errors
+
 from .dialog_search import DialogCandidate, find_dialog_candidates
 from .member_export import ExportSummary, export_members
+from .models import SessionMeta
 from .session_manager import (
     NoActiveSessionError,
     SessionLoginError,
+    SessionAuthorizationError,
     SessionManager,
-    SessionPrompts,
 )
 
 MENU_EXPORT = "Export members"
@@ -183,39 +186,13 @@ class ScriptedPromptBackend:
         return bool(response)
 
 
-class UIFlowPrompts(SessionPrompts):
-    def __init__(self, backend: PromptBackend) -> None:
-        self.backend = backend
+@dataclass(frozen=True, slots=True)
+class LoginPreparation:
+    authorized: bool
+    user: Any | None = None
+    phone_code_hash: str | None = None
 
-    def request_phone(self, session_name: str) -> str:
-        response = self.backend.ask_text(
-            f"Phone number for session {session_name!r}:",
-        )
-        if response is None:
-            raise PromptCancelled()
-        return response
 
-    def request_code(
-        self,
-        session_name: str,
-        phone_number: str,
-        attempt_number: int,
-    ) -> str:
-        response = self.backend.ask_text(
-            f"Login code for {session_name!r} ({phone_number}), attempt {attempt_number}:",
-        )
-        if response is None:
-            raise PromptCancelled()
-        return response
-
-    def request_password(self, session_name: str, attempt_number: int) -> str:
-        response = self.backend.ask_text(
-            f"Telegram password for {session_name!r}, attempt {attempt_number}:",
-            secret=True,
-        )
-        if response is None:
-            raise PromptCancelled()
-        return response
 def _is_interactive_terminal() -> bool:
     stdin = getattr(sys, "stdin", None)
     stdout = getattr(sys, "stdout", None)
@@ -303,8 +280,10 @@ class TerminalUI:
         self.session_manager = session_manager
         self.backend = backend or QuestionaryPromptBackend()
         self.printer = printer
-        self.session_prompts = UIFlowPrompts(self.backend)
         self.last_export_summary: ExportSummary | None = None
+
+    def _run_async(self, awaitable: Any) -> Any:
+        return asyncio.run(awaitable)
 
     def _print_status(self) -> None:
         active_session = self.session_manager.get_active_session()
@@ -353,7 +332,7 @@ class TerminalUI:
             raise PromptCancelled()
         return response
 
-    async def run(self) -> int:
+    def run(self) -> int:
         if not _is_interactive_terminal():
             self.printer(
                 "Interactive terminal required. Run `python3 main.py` from a TTY."
@@ -387,32 +366,188 @@ class TerminalUI:
 
             try:
                 if action == MENU_EXPORT:
-                    await self.export_members_flow()
+                    self.export_members_flow()
                 elif action == MENU_CREATE_SESSION:
-                    await self.create_session_flow()
+                    self.create_session_flow()
                 elif action == MENU_SWITCH_SESSION:
-                    await self.switch_active_session_flow()
+                    self.switch_active_session_flow()
             except PromptCancelled:
                 self.printer("Operation cancelled.")
             except SessionLoginError as exc:
                 self.printer(f"Session login failed: {exc}")
             except NoActiveSessionError as exc:
                 self.printer(str(exc))
+            except SessionAuthorizationError as exc:
+                self.printer(str(exc))
             except Exception as exc:  # pragma: no cover - defensive runtime guard
                 self.printer(f"Operation failed: {exc}")
 
-    async def create_session_flow(self) -> None:
+    def _normalize_phone_number(self, value: str) -> str:
+        phone_number = value.strip()
+        return phone_number if phone_number.startswith("+") else f"+{phone_number}"
+
+    def _describe_account(self, user: Any, phone_number: str | None = None) -> str | None:
+        username = getattr(user, "username", None)
+        if username:
+            return f"@{username}"
+
+        first_name = getattr(user, "first_name", None)
+        last_name = getattr(user, "last_name", None)
+        display_name = " ".join(part for part in [first_name, last_name] if part)
+        if display_name.strip():
+            return display_name.strip()
+
+        phone = getattr(user, "phone", None) or phone_number
+        if phone:
+            return self._normalize_phone_number(str(phone))
+        return None
+
+    async def _prepare_login(self, session_name: str, api_id: int, api_hash: str, phone_number: str) -> LoginPreparation:
+        async with self.session_manager.gateway.open_client(session_name, api_id, api_hash) as client:
+            authorized = await self.session_manager.gateway.run_with_retry(
+                client.is_user_authorized,
+                operation_name="check Telegram authorization",
+            )
+            if authorized:
+                return LoginPreparation(
+                    authorized=True,
+                    user=await self.session_manager.gateway.get_current_user(client),
+                )
+
+            sent_code = await self.session_manager.gateway.request_login_code(
+                client,
+                phone_number,
+            )
+            phone_code_hash = getattr(sent_code, "phone_code_hash", None)
+            if not phone_code_hash:
+                raise SessionLoginError("Telegram did not return a phone code hash")
+            return LoginPreparation(authorized=False, phone_code_hash=phone_code_hash)
+
+    async def _sign_in_with_code(
+        self,
+        *,
+        session_name: str,
+        api_id: int,
+        api_hash: str,
+        phone_number: str,
+        code: str,
+        phone_code_hash: str,
+    ) -> Any:
+        async with self.session_manager.gateway.open_client(session_name, api_id, api_hash) as client:
+            await self.session_manager.gateway.sign_in(
+                client,
+                phone=phone_number,
+                code=code,
+                phone_code_hash=phone_code_hash,
+            )
+            return await self.session_manager.gateway.get_current_user(client)
+
+    async def _sign_in_with_password(
+        self,
+        *,
+        session_name: str,
+        api_id: int,
+        api_hash: str,
+        password: str,
+    ) -> Any:
+        async with self.session_manager.gateway.open_client(session_name, api_id, api_hash) as client:
+            await self.session_manager.gateway.sign_in(client, password=password)
+            return await self.session_manager.gateway.get_current_user(client)
+
+    def _save_session(self, session_name: str, api_id: int, api_hash: str, user: Any, phone_number: str) -> SessionMeta:
+        try:
+            existing_session = self.session_manager.state_store.load_session(session_name)
+            created_at = existing_session.created_at
+        except FileNotFoundError:
+            created_at = datetime.now(timezone.utc)
+
+        session = SessionMeta(
+            session_name=session_name,
+            api_id=api_id,
+            api_hash=api_hash,
+            created_at=created_at,
+            updated_at=datetime.now(timezone.utc),
+            account_label=self._describe_account(user, phone_number),
+            phone_number=self._normalize_phone_number(phone_number),
+            is_active=False,
+        )
+        self.session_manager.state_store.save_session(session)
+        return session
+
+    def create_session_flow(self) -> None:
         session_name = self._ask_text("Session name:")
         api_id = self._ask_positive_int("API_ID:")
         api_hash = self._ask_text("API_HASH:", secret=True)
 
-        session = await self.session_manager.create_session(
-            session_name=session_name,
-            api_id=api_id,
-            api_hash=api_hash,
-            prompts=self.session_prompts,
-            mark_active=False,
+        phone_number = self._ask_text(f"Phone number for session {session_name!r}:")
+        login_prelude = self._run_async(
+            self._prepare_login(session_name, api_id, api_hash, phone_number)
         )
+        if login_prelude.authorized:
+            user = login_prelude.user
+        else:
+            if login_prelude.phone_code_hash is None:
+                raise SessionLoginError("Telegram did not return a phone code hash")
+
+            current_hash = login_prelude.phone_code_hash
+            user = None
+            for code_attempt in range(1, 4):
+                code = self._ask_text(
+                    f"Login code for {session_name!r} ({phone_number}), attempt {code_attempt}:"
+                )
+                try:
+                    user = self._run_async(
+                        self._sign_in_with_code(
+                            session_name=session_name,
+                            api_id=api_id,
+                            api_hash=api_hash,
+                            phone_number=phone_number,
+                            code=code,
+                            phone_code_hash=current_hash,
+                        )
+                    )
+                    break
+                except errors.PhoneCodeInvalidError as exc:
+                    if code_attempt >= 3:
+                        raise SessionLoginError("Telegram login code was rejected") from exc
+                    continue
+                except errors.PhoneCodeExpiredError as exc:
+                    if code_attempt >= 3:
+                        raise SessionLoginError("Telegram login code expired") from exc
+                    login_prelude = self._run_async(
+                        self._prepare_login(session_name, api_id, api_hash, phone_number)
+                    )
+                    if login_prelude.phone_code_hash is None:
+                        raise SessionLoginError("Telegram did not return a phone code hash")
+                    current_hash = login_prelude.phone_code_hash
+                    continue
+                except errors.SessionPasswordNeededError:
+                    for password_attempt in range(1, 4):
+                        password = self._ask_text(
+                            f"Telegram password for {session_name!r}, attempt {password_attempt}:",
+                            secret=True,
+                        )
+                        try:
+                            user = self._run_async(
+                                self._sign_in_with_password(
+                                    session_name=session_name,
+                                    api_id=api_id,
+                                    api_hash=api_hash,
+                                    password=password,
+                                )
+                            )
+                            break
+                        except errors.PasswordHashInvalidError as exc:
+                            if password_attempt >= 3:
+                                raise SessionLoginError("Telegram password was rejected") from exc
+                            continue
+                    if user is not None:
+                        break
+
+            if user is None:
+                raise SessionLoginError("Telegram login code attempts were exhausted")
+
+        session = self._save_session(session_name, api_id, api_hash, user, phone_number)
         self.printer(
             f"Created session {session.session_name!r} for "
             f"{session.account_label or _mask_phone_number(session.phone_number) or 'unknown account'}"
@@ -422,7 +557,7 @@ class TerminalUI:
             session = self.session_manager.set_active_session(session.session_name)
             self.printer(f"Active session set to {session.session_name!r}")
 
-    async def switch_active_session_flow(self) -> None:
+    def switch_active_session_flow(self) -> None:
         sessions = self.session_manager.list_sessions()
         if not sessions:
             self.printer("No saved sessions found.")
@@ -442,7 +577,7 @@ class TerminalUI:
         session = self.session_manager.set_active_session(str(choice))
         self.printer(f"Active session set to {_session_context(session)}")
 
-    async def _ensure_active_session(self) -> Any | None:
+    def _ensure_active_session(self) -> Any | None:
         active_session = self.session_manager.get_active_session()
         if active_session is not None:
             return active_session
@@ -456,15 +591,15 @@ class TerminalUI:
             ],
         )
         if choice == MENU_CREATE_SESSION:
-            await self.create_session_flow()
+            self.create_session_flow()
         elif choice == MENU_SWITCH_SESSION:
-            await self.switch_active_session_flow()
+            self.switch_active_session_flow()
         else:
             return None
 
         return self.session_manager.get_active_session()
 
-    async def _choose_dialog(self, query: str, candidates: Sequence[DialogCandidate]) -> DialogCandidate | None:
+    def _choose_dialog(self, query: str, candidates: Sequence[DialogCandidate]) -> DialogCandidate | None:
         if not candidates:
             self.printer(f"No dialogs matched {query!r}.")
             return None
@@ -477,8 +612,31 @@ class TerminalUI:
         )
         return chosen if isinstance(chosen, DialogCandidate) else None
 
-    async def export_members_flow(self) -> None:
-        session = await self._ensure_active_session()
+    async def _load_dialog_candidates(
+        self,
+        session_name: str,
+        query: str,
+    ) -> list[DialogCandidate]:
+        async with self.session_manager.open_authorized_client(session_name) as client:
+            return await find_dialog_candidates(client, query)
+
+    async def _export_selected_dialog(
+        self,
+        session_name: str,
+        candidate: DialogCandidate,
+    ) -> ExportSummary:
+        async with self.session_manager.open_authorized_client(session_name) as client:
+            gateway = self.session_manager.gateway.bind_client(client)
+            chat = await gateway.get_entity(candidate.peer_id)
+            return await export_members(
+                gateway,
+                chat,
+                runtime_dir=self.session_manager.state_store.runtime_dir,
+                chat_label=candidate.title,
+            )
+
+    def export_members_flow(self) -> None:
+        session = self._ensure_active_session()
         if session is None:
             self.printer("Export cancelled: no active session.")
             return
@@ -487,20 +645,12 @@ class TerminalUI:
         if not query.strip():
             raise ValueError("Group title must not be empty")
 
-        async with self.session_manager.open_authorized_client(session.session_name) as client:
-            candidates = await find_dialog_candidates(client, query)
-            candidate = await self._choose_dialog(query, candidates)
-            if candidate is None:
-                return
+        candidates = self._run_async(self._load_dialog_candidates(session.session_name, query))
+        candidate = self._choose_dialog(query, candidates)
+        if candidate is None:
+            return
 
-            gateway = self.session_manager.gateway.bind_client(client)
-            chat = await gateway.get_entity(candidate.peer_id)
-            summary = await export_members(
-                gateway,
-                chat,
-                runtime_dir=self.session_manager.state_store.runtime_dir,
-                chat_label=candidate.title,
-            )
+        summary = self._run_async(self._export_selected_dialog(session.session_name, candidate))
 
         self.last_export_summary = summary
         self.printer("")
@@ -518,7 +668,7 @@ def run_app() -> int:
     session_manager = SessionManager(StateStore())
     ui = TerminalUI(session_manager)
     try:
-        return asyncio.run(ui.run())
+        return ui.run()
     except KeyboardInterrupt:  # pragma: no cover - interactive only
         return 130
 
