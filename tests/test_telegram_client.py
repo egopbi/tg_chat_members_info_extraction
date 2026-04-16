@@ -117,6 +117,10 @@ def test_concrete_gateway_adapter_is_wireable_to_export_members(tmp_path: Path) 
             personal_channel_id=77,
         )
         linked_channel = SimpleNamespace(username="alice-channel")
+        full_user_response = SimpleNamespace(
+            full_user=full_user,
+            users=[SimpleNamespace(id=2, phone="+15550000002")],
+        )
 
         class FallbackClient:
             async def get_me(self) -> object:
@@ -131,7 +135,7 @@ def test_concrete_gateway_adapter_is_wireable_to_export_members(tmp_path: Path) 
 
             async def __call__(self, request: object) -> object:
                 assert request.__class__.__name__ == "GetFullUserRequest"
-                return SimpleNamespace(full_user=full_user)
+                return full_user_response
 
             async def get_entity(self, peer: object) -> object:
                 return linked_channel
@@ -145,7 +149,8 @@ def test_concrete_gateway_adapter_is_wireable_to_export_members(tmp_path: Path) 
         adapter = gateway.bind_client(client)
 
         full_user_result = await adapter.get_full_user(participant)
-        assert full_user_result is full_user
+        assert full_user_result.about == "About Alice"
+        assert full_user_result.phone == "+15550000002"
 
         summary = await export_members(
             adapter,
@@ -163,6 +168,8 @@ def test_concrete_gateway_adapter_is_wireable_to_export_members(tmp_path: Path) 
         assert row.user_id == 2
         assert row.about.status == "value"
         assert row.birthday.status == "value"
+        assert row.phone_number.status == "value"
+        assert row.phone_number.value == "+15550000002"
         assert row.linked_channel_url.value == "https://t.me/alice-channel"
         assert row.photo_path.status == "value"
         assert summary.csv_path.exists()

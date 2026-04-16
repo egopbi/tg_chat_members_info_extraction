@@ -21,6 +21,7 @@ class FakeParticipant:
     first_name: str | None = None
     last_name: str | None = None
     username: str | None = None
+    phone: str | None = None
     photo: object | None = None
 
 
@@ -29,6 +30,7 @@ class FakeFullUser:
     about: str | None
     birthday: object | None
     personal_channel_id: int | None
+    phone: str | None = None
 
 
 @dataclass(slots=True)
@@ -50,11 +52,11 @@ class FakeGateway:
             FakeParticipant(id=2, first_name="Alice", last_name="Example", username="alice", photo=object()),
             FakeParticipant(id=2, first_name="Alice", last_name="Example", username="alice", photo=object()),
             FakeParticipant(id=3, first_name="Bob", last_name=None, username=None, photo=None),
-            FakeParticipant(id=4, first_name="Retry", last_name="User", username="retry", photo=object()),
+            FakeParticipant(id=4, first_name="Retry", last_name="User", username="retry", phone="+15550000004", photo=object()),
         ]
         self.full_users = {
-            2: FakeFullUser(about="About Alice", birthday=FakeBirthday(1, 2, 2000), personal_channel_id=77),
-            3: FakeFullUser(about="", birthday=None, personal_channel_id=88),
+            2: FakeFullUser(about="About Alice", birthday=FakeBirthday(1, 2, 2000), personal_channel_id=77, phone="+15550000002"),
+            3: FakeFullUser(about="", birthday=None, personal_channel_id=88, phone=None),
         }
         self.channels = {
             77: FakeChannel(username="alice-channel"),
@@ -140,16 +142,21 @@ def test_export_members_is_best_effort_and_summary_rich(tmp_path: Path) -> None:
     rows = {row.user_id: row for row in summary.rows}
     assert rows[2].about.status == "value"
     assert rows[2].birthday.status == "value"
+    assert rows[2].phone_number.status == "value"
+    assert rows[2].phone_number.value == "+15550000002"
     assert rows[2].linked_channel_url.status == "value"
     assert rows[2].linked_channel_url.value == "https://t.me/alice-channel"
     assert rows[2].photo_path.status == "value"
     assert rows[2].photo_path.value.endswith("2_alice_example_alice.jpg")
 
+    assert rows[4].phone_number.status == "value"
+    assert rows[4].phone_number.value == "+15550000004"
     assert rows[4].about.status == "error"
     assert rows[4].birthday.status == "error"
     assert rows[4].linked_channel_url.status == "error"
     assert rows[4].photo_path.status == "error"
 
+    assert rows[3].phone_number.status == "unavailable"
     assert rows[3].about.status == "empty"
     assert rows[3].birthday.status == "empty"
     assert rows[3].linked_channel_url.status == "empty"

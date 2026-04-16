@@ -24,6 +24,52 @@ class TelegramGatewayError(RuntimeError):
     """Raised when the gateway cannot satisfy a requested Telegram operation."""
 
 
+@dataclass(frozen=True, slots=True)
+class FullUserDetails:
+    about: str | None
+    birthday: Any | None
+    personal_channel_id: int | None
+    phone: str | None = None
+
+
+def _clean_phone_number(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _extract_phone_number(payload: Any, *, user_id: int | None = None) -> str | None:
+    direct_phone = _clean_phone_number(getattr(payload, "phone", None))
+    if direct_phone is not None:
+        return direct_phone
+
+    direct_user = getattr(payload, "user", None)
+    if direct_user is not None:
+        user_phone = _clean_phone_number(getattr(direct_user, "phone", None))
+        if user_phone is not None:
+            return user_phone
+
+    users = getattr(payload, "users", None)
+    if not users:
+        return None
+
+    if user_id is not None:
+        for candidate in users:
+            if getattr(candidate, "id", None) != user_id:
+                continue
+            candidate_phone = _clean_phone_number(getattr(candidate, "phone", None))
+            if candidate_phone is not None:
+                return candidate_phone
+
+    for candidate in users:
+        candidate_phone = _clean_phone_number(getattr(candidate, "phone", None))
+        if candidate_phone is not None:
+            return candidate_phone
+
+    return None
+
+
 class TelegramGateway:
     def __init__(
         self,
@@ -193,14 +239,26 @@ class TelegramClientAdapter:
     def iter_participants(self, chat: Any) -> AsyncIterator[Any]:
         return self.client.iter_participants(chat)
 
-    async def get_full_user(self, user: Any) -> Any:
+    async def get_full_user(self, user: Any) -> FullUserDetails:
         custom_getter = getattr(self.client, "get_full_user", None)
         if callable(custom_getter):
-            return await custom_getter(user)
-        input_user = utils.get_input_user(user)
-        response = await self.client(functions.users.GetFullUserRequest(input_user))
+            response = await custom_getter(user)
+        else:
+            input_user = utils.get_input_user(user)
+            response = await self.client(functions.users.GetFullUserRequest(input_user))
+
         full_user = getattr(response, "full_user", response)
-        return full_user if full_user is not None else response
+        if full_user is None:
+            full_user = response
+        return FullUserDetails(
+            about=getattr(full_user, "about", None),
+            birthday=getattr(full_user, "birthday", None),
+            personal_channel_id=getattr(full_user, "personal_channel_id", None),
+            phone=(
+                _extract_phone_number(full_user, user_id=getattr(user, "id", None))
+                or _extract_phone_number(response, user_id=getattr(user, "id", None))
+            ),
+        )
 
     async def get_entity(self, peer: Any) -> Any:
         return await self.client.get_entity(peer)

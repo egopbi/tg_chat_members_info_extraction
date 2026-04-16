@@ -24,6 +24,7 @@ class ParticipantLike(Protocol):
     first_name: str | None
     last_name: str | None
     username: str | None
+    phone: str | None
     photo: Any | None
 
 
@@ -31,6 +32,7 @@ class FullUserLike(Protocol):
     about: str | None
     birthday: Any | None
     personal_channel_id: int | None
+    phone: str | None
 
 
 class TelegramGateway(Protocol):
@@ -51,6 +53,7 @@ class MemberExportRow:
     first_name: str
     last_name: str
     username: str
+    phone_number: FieldResult[str]
     about: FieldResult[str]
     birthday: FieldResult[str]
     photo_path: FieldResult[str]
@@ -62,6 +65,7 @@ class MemberExportRow:
             first_name=self.first_name,
             last_name=self.last_name,
             username=self.username,
+            phone_number=self.phone_number,
             about=self.about,
             birthday=self.birthday,
             photo_path=self.photo_path,
@@ -174,6 +178,16 @@ def _birthday_to_text(value: Any) -> str:
 def _birthday_result(value: Any) -> FieldResult[str]:
     text = _birthday_to_text(value)
     return FieldResult.from_value(text) if text else FieldResult.empty()
+
+
+def _phone_result(*sources: Any) -> FieldResult[str]:
+    for source in sources:
+        if source is None:
+            continue
+        phone = _clean_text(getattr(source, "phone", None))
+        if phone:
+            return FieldResult.from_value(phone)
+    return FieldResult.unavailable()
 
 
 def _explicit_wait_seconds(exc: Exception) -> float | None:
@@ -420,6 +434,7 @@ async def _build_row(
     first_name = _clean_text(getattr(participant, "first_name", None))
     last_name = _clean_text(getattr(participant, "last_name", None))
     username = _clean_text(getattr(participant, "username", None))
+    participant_phone = _phone_result(participant)
     logger.debug("Building export row for user %s (%s)", user_id, username or "no username")
 
     try:
@@ -439,6 +454,7 @@ async def _build_row(
                     first_name=first_name,
                     last_name=last_name,
                     username=username,
+                    phone_number=participant_phone,
                     about=FieldResult.unavailable(),
                     birthday=FieldResult.unavailable(),
                     photo_path=await _download_avatar(
@@ -462,6 +478,9 @@ async def _build_row(
                 first_name=first_name,
                 last_name=last_name,
                 username=username,
+                phone_number=(
+                    participant_phone if participant_phone.has_value else FieldResult.error(str(exc))
+                ),
                 about=FieldResult.error(str(exc)),
                 birthday=FieldResult.error(str(exc)),
                 photo_path=await _download_avatar(
@@ -481,6 +500,7 @@ async def _build_row(
 
     about = _text_result(getattr(full_user, "about", None))
     birthday = _birthday_result(getattr(full_user, "birthday", None))
+    phone_number = participant_phone if participant_phone.has_value else _phone_result(full_user)
     linked_channel_url = await _resolve_linked_channel_url(
         gateway,
         full_user,
@@ -512,6 +532,7 @@ async def _build_row(
             first_name=first_name,
             last_name=last_name,
             username=username,
+            phone_number=phone_number,
             about=about,
             birthday=birthday,
             photo_path=photo_path,

@@ -25,6 +25,8 @@ CSV_COLUMNS = [
     "first_name",
     "last_name",
     "username",
+    "phone_number",
+    "phone_number_status",
     "about",
     "about_status",
     "birthday",
@@ -42,6 +44,7 @@ class CsvExportRow:
     first_name: str
     last_name: str
     username: str
+    phone_number: FieldResult[str]
     about: FieldResult[str]
     birthday: FieldResult[str]
     photo_path: FieldResult[str]
@@ -58,6 +61,8 @@ def row_to_dict(row: CsvExportRow) -> dict[str, str]:
         "first_name": row.first_name,
         "last_name": row.last_name,
         "username": row.username,
+        "phone_number": _field_value(row.phone_number),
+        "phone_number_status": row.phone_number.status,
         "about": _field_value(row.about),
         "about_status": row.about.status,
         "birthday": _field_value(row.birthday),
